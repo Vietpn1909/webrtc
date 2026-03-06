@@ -1,0 +1,38 @@
+# Virtual environment
+env_hybrid/
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# SSL certificates (sensitive)
+*.pem
+cert.pem
+key.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# PyTorch models (large files)
+*.pt
+*.pth
+*.onnx
