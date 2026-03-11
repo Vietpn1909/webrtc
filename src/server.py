@@ -1,282 +1,110 @@
-"""
-Hybrid WebRTC Signaling Server
-Enables 2 computers to connect and call each other with AI audio processing
-"""
-
 import asyncio
 import json
-import logging
-import os
-import socket
-import ssl
-import uuid
-from pathlib import Path
-
 from aiohttp import web
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from av import AudioFrame
+import numpy as np
+import torch
+from df.enhance import init_df, enhance
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("hybrid-webrtc")
+print("Đang nạp mô hình DeepFilterNet3 vào bộ nhớ...")
+df_model, df_state, _ = init_df()
 
-# Store active rooms
-rooms = {}  # room_id -> {users: {}, offer: None, answer: None, ice_candidates: {}}
+room_tracks = {
+    'user1': None,
+    'user2': None
+}
 
+class AIFilterTrack(MediaStreamTrack):
+    kind = "audio"
+
+    def __init__(self, my_role):
+        super().__init__()
+        self.my_role = my_role
+        self.partner_role = 'user2' if my_role == 'user1' else 'user1'
+
+    async def recv(self):
+        my_mic_track = room_tracks.get(self.my_role)
+        if not my_mic_track:
+            await asyncio.sleep(0.02)
+            return self._create_silent_frame()
+
+        my_frame = await my_mic_track.recv()
+        
+        # Chuyển đổi định dạng cho AI (Tensor Float32)
+        my_audio = my_frame.to_ndarray().astype(np.float32) / 32768.0
+        my_tensor = torch.from_numpy(my_audio)
+
+        partner_track = room_tracks.get(self.partner_role)
+        clean_tensor = None
+
+        if partner_track:
+            try:
+                # Đợi tối đa 10ms để lấy tiếng của đối tác làm mẫu Khử vọng
+                partner_frame = await asyncio.wait_for(partner_track.recv(), timeout=0.01)
+                partner_audio = partner_frame.to_ndarray().astype(np.float32) / 32768.0
+                partner_tensor = torch.from_numpy(partner_audio)
+                
+                # Joint AEC & Noise Suppression
+                clean_tensor = enhance(df_model, df_state, my_tensor, attn_state=partner_tensor)
+            except asyncio.TimeoutError:
+                # Đối tác đang im lặng, chỉ cần Khử ồn
+                clean_tensor = enhance(df_model, df_state, my_tensor)
+        else:
+            clean_tensor = enhance(df_model, df_state, my_tensor)
+
+        # Trả lại định dạng WebRTC
+        clean_audio = (clean_tensor.squeeze().numpy() * 32768.0).astype(np.int16)
+        clean_audio = clean_audio.reshape(1, -1)
+        
+        new_frame = AudioFrame.from_ndarray(clean_audio, format='s16', layout='mono')
+        new_frame.pts = my_frame.pts
+        new_frame.sample_rate = my_frame.sample_rate
+        new_frame.time_base = my_frame.time_base
+        
+        return new_frame
+
+    def _create_silent_frame(self):
+        silent_audio = np.zeros((1, 480), dtype=np.int16)
+        frame = AudioFrame.from_ndarray(silent_audio, format='s16', layout='mono')
+        frame.sample_rate = 48000
+        frame.time_base = 1/48000
+        return frame
 
 async def index(request):
-    """Serve the main HTML page"""
-    content = open(Path(__file__).parent / "index.html", "r", encoding="utf-8").read()
+    content = open("index.html", "r", encoding="utf-8").read()
     return web.Response(content_type="text/html", text=content)
 
-
-async def create_room(request):
-    """Create a new room and return room ID"""
-    room_id = str(uuid.uuid4())[:8]
-    rooms[room_id] = {"users": {}, "offer": None, "answer": None, "ice_candidates": {}}
-    logger.info(f"Created room: {room_id}")
-    return web.json_response({"room_id": room_id})
-
-
-async def join_room(request):
-    """Join an existing room"""
-    data = await request.json()
-    room_id = data.get("room_id")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    user_id = str(uuid.uuid4())[:8]
-    room = rooms[room_id]
-    
-    if len(room["users"]) >= 2:
-        return web.json_response({"error": "Room is full"}, status=400)
-    
-    room["users"][user_id] = {"joined": True}
-    is_caller = len(room["users"]) == 1
-    
-    logger.info(f"User {user_id} joined room {room_id} as {'caller' if is_caller else 'callee'}")
-    return web.json_response({
-        "user_id": user_id,
-        "is_caller": is_caller,
-        "users_count": len(room["users"])
-    })
-
-
 async def offer(request):
-    """Handle WebRTC offer from caller"""
-    data = await request.json()
-    room_id = data.get("room_id")
-    user_id = data.get("user_id")
-    sdp = data.get("sdp")
-    sdp_type = data.get("type")
+    params = await request.json()
+    role = params['role']
     
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    room["offer"] = {"sdp": sdp, "type": sdp_type, "user_id": user_id}
-    
-    logger.info(f"Received offer from {user_id} in room {room_id}")
-    return web.json_response({"status": "ok"})
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    pc = RTCPeerConnection()
 
+    @pc.on("track")
+    def on_track(track):
+        if track.kind == "audio":
+            print(f"[{role}] Đã nhận luồng micro.")
+            room_tracks[role] = track
+            
+            # Khởi tạo luồng nghe: Lấy micro của ĐỐI TÁC, làm sạch rồi gửi về
+            outgoing_track = AIFilterTrack(my_role='user2' if role == 'user1' else 'user1')
+            pc.addTrack(outgoing_track)
 
-async def get_offer(request):
-    """Get the offer for callee"""
-    room_id = request.query.get("room_id")
-    user_id = request.query.get("user_id")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    
-    if room["offer"] and room["offer"]["user_id"] != user_id:
-        return web.json_response(room["offer"])
-    
-    return web.json_response({"status": "waiting"})
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
 
-
-async def answer(request):
-    """Handle WebRTC answer from callee"""
-    data = await request.json()
-    room_id = data.get("room_id")
-    user_id = data.get("user_id")
-    sdp = data.get("sdp")
-    sdp_type = data.get("type")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    room["answer"] = {"sdp": sdp, "type": sdp_type, "user_id": user_id}
-    
-    logger.info(f"Received answer from {user_id} in room {room_id}")
-    return web.json_response({"status": "ok"})
-
-
-async def get_answer(request):
-    """Get the answer for caller"""
-    room_id = request.query.get("room_id")
-    user_id = request.query.get("user_id")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    
-    if room["answer"] and room["answer"]["user_id"] != user_id:
-        return web.json_response(room["answer"])
-    
-    return web.json_response({"status": "waiting"})
-
-
-async def ice_candidate(request):
-    """Store ICE candidate"""
-    data = await request.json()
-    room_id = data.get("room_id")
-    user_id = data.get("user_id")
-    candidate = data.get("candidate")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    
-    if user_id not in room["ice_candidates"]:
-        room["ice_candidates"][user_id] = []
-    
-    room["ice_candidates"][user_id].append(candidate)
-    
-    return web.json_response({"status": "ok"})
-
-
-async def get_ice_candidates(request):
-    """Get ICE candidates from the other user"""
-    room_id = request.query.get("room_id")
-    user_id = request.query.get("user_id")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    candidates = []
-    
-    for uid, cands in room["ice_candidates"].items():
-        if uid != user_id:
-            candidates.extend(cands)
-    
-    return web.json_response({"candidates": candidates})
-
-
-async def check_room(request):
-    """Check room status"""
-    room_id = request.query.get("room_id")
-    
-    if room_id not in rooms:
-        return web.json_response({"error": "Room not found"}, status=404)
-    
-    room = rooms[room_id]
-    return web.json_response({
-        "users_count": len(room["users"]),
-        "has_offer": room["offer"] is not None,
-        "has_answer": room["answer"] is not None
-    })
-
-
-async def leave_room(request):
-    """Leave a room"""
-    data = await request.json()
-    room_id = data.get("room_id")
-    user_id = data.get("user_id")
-    
-    if room_id in rooms and user_id in rooms[room_id]["users"]:
-        del rooms[room_id]["users"][user_id]
-        logger.info(f"User {user_id} left room {room_id}")
-    
-    return web.json_response({"status": "ok"})
-
-
-async def cleanup_rooms():
-    """Periodically clean up empty rooms"""
-    while True:
-        await asyncio.sleep(300)
-        empty_rooms = [rid for rid, room in rooms.items() if len(room["users"]) == 0]
-        for rid in empty_rooms:
-            del rooms[rid]
-            logger.info(f"Cleaned up empty room: {rid}")
-
-
-async def start_background_tasks(app):
-    app['cleanup_task'] = asyncio.create_task(cleanup_rooms())
-
-
-async def cleanup_background_tasks(app):
-    app['cleanup_task'].cancel()
-    try:
-        await app['cleanup_task']
-    except asyncio.CancelledError:
-        pass
-
-
-def get_local_ip():
-    """Get the local IP address of this machine"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def create_app():
-    app = web.Application()
-    app.router.add_get("/", index)
-    app.router.add_post("/api/create-room", create_room)
-    app.router.add_post("/api/join-room", join_room)
-    app.router.add_post("/api/offer", offer)
-    app.router.add_get("/api/offer", get_offer)
-    app.router.add_post("/api/answer", answer)
-    app.router.add_get("/api/answer", get_answer)
-    app.router.add_post("/api/ice-candidate", ice_candidate)
-    app.router.add_get("/api/ice-candidates", get_ice_candidates)
-    app.router.add_get("/api/check-room", check_room)
-    app.router.add_post("/api/leave-room", leave_room)
-    
-    app.on_startup.append(start_background_tasks)
-    app.on_cleanup.append(cleanup_background_tasks)
-    
-    return app
-
+    return web.Response(
+        content_type="application/json",
+        text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
+    )
 
 if __name__ == "__main__":
-    app = create_app()
-    port = int(os.environ.get("PORT", 8080))
-    local_ip = get_local_ip()
+    app = web.Application()
+    app.router.add_get("/", index)
+    app.router.add_post("/offer", offer)
     
-    # Setup SSL context for HTTPS (required for camera/mic on non-localhost)
-    ssl_context = None
-    protocol = "http"
-    cert_path = Path(__file__).parent / "cert.pem"
-    key_path = Path(__file__).parent / "key.pem"
-    
-    if cert_path.exists() and key_path.exists():
-        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        ssl_context.load_cert_chain(str(cert_path), str(key_path))
-        protocol = "https"
-    else:
-        print("\n⚠️  No SSL certificates found. Running without HTTPS.")
-        print("   Camera/microphone will only work on localhost.")
-        print("   To generate certificates, run:")
-        print("   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes\n")
-    
-    print("\n" + "="*55)
-    print("🚀 Hybrid WebRTC Call Server")
-    print("="*55)
-    print(f"\n📍 Local access:   {protocol}://localhost:{port}")
-    print(f"📍 Network access: {protocol}://{local_ip}:{port}")
-    print("\n💡 Share the network URL with the other computer!")
-    if protocol == "https":
-        print("⚠️  Accept the self-signed certificate warning in browser.")
-    print("="*55 + "\n")
-    
-    web.run_app(app, host="0.0.0.0", port=port, ssl_context=ssl_context, print=None)
+    print("🚀 Server DeepFilter SFU đang chạy tại: http://localhost:8080")
+    web.run_app(app, port=8080)

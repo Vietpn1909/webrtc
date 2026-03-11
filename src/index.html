@@ -2,444 +2,64 @@
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hybrid WebRTC Call</title>
+    <title>Bộ đàm AI - DeepFilterNet</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            min-height: 100vh;
-            color: white;
-            padding: 20px;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-        }
-        h1 {
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2em;
-        }
-        .panel {
-            background: rgba(255,255,255,0.1);
-            border-radius: 15px;
-            padding: 25px;
-            margin-bottom: 20px;
-            backdrop-filter: blur(10px);
-        }
-        .panel h2 {
-            margin-bottom: 15px;
-            font-size: 1.2em;
-            color: #4fc3f7;
-        }
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        button {
-            background: #4fc3f7;
-            color: #1a1a2e;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 1em;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        button:hover { background: #81d4fa; transform: translateY(-2px); }
-        button:disabled { background: #666; cursor: not-allowed; transform: none; }
-        button.danger { background: #ef5350; }
-        button.danger:hover { background: #f44336; }
-        input {
-            padding: 12px 16px;
-            border-radius: 8px;
-            border: 2px solid rgba(255,255,255,0.2);
-            background: rgba(255,255,255,0.1);
-            color: white;
-            font-size: 1em;
-            width: 200px;
-        }
-        input::placeholder { color: rgba(255,255,255,0.5); }
-        .room-info {
-            background: rgba(79, 195, 247, 0.2);
-            padding: 15px 20px;
-            border-radius: 10px;
-            margin: 15px 0;
-            font-family: monospace;
-            font-size: 1.3em;
-            text-align: center;
-        }
-        .status {
-            padding: 10px 15px;
-            border-radius: 8px;
-            margin-top: 15px;
-            font-size: 0.95em;
-        }
-        .status.info { background: rgba(33, 150, 243, 0.3); }
-        .status.success { background: rgba(76, 175, 80, 0.3); }
-        .status.error { background: rgba(244, 67, 54, 0.3); }
-        .status.warning { background: rgba(255, 152, 0, 0.3); }
-        .audio-container {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin-top: 20px;
-        }
-        .audio-box {
-            text-align: center;
-            padding: 20px;
-            background: rgba(0,0,0,0.2);
-            border-radius: 10px;
-            min-width: 200px;
-        }
-        .audio-box h3 { margin-bottom: 10px; font-size: 0.9em; color: #aaa; }
-        .visualizer {
-            height: 60px;
-            background: rgba(0,0,0,0.3);
-            border-radius: 5px;
-            margin-top: 10px;
-            display: flex;
-            align-items: flex-end;
-            justify-content: center;
-            gap: 3px;
-            padding: 5px;
-        }
-        .visualizer .bar {
-            width: 8px;
-            background: #4fc3f7;
-            border-radius: 3px;
-            transition: height 0.1s;
-        }
-        #callControls { display: none; }
-        .hidden { display: none !important; }
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+        button { padding: 15px 30px; font-size: 16px; margin: 10px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; }
+        #status { margin-top: 20px; font-weight: bold; color: green; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>📞 Hybrid WebRTC Call</h1>
-        
-        <div class="panel" id="roomPanel">
-            <h2>Room Setup</h2>
-            <div class="btn-group">
-                <button id="createRoomBtn">Create New Room</button>
-                <input type="text" id="roomIdInput" placeholder="Enter Room ID">
-                <button id="joinRoomBtn">Join Room</button>
-            </div>
-            <div id="roomInfo" class="hidden">
-                <div class="room-info">Room: <span id="roomIdDisplay"></span></div>
-                <p style="text-align:center; color:#aaa;">Share this Room ID with the other person</p>
-            </div>
-            <div id="statusBox" class="status info hidden"></div>
-        </div>
-
-        <div class="panel" id="callControls">
-            <h2>Call Controls</h2>
-            <div class="btn-group">
-                <button id="startCallBtn">Start Call</button>
-                <button id="hangupBtn" class="danger" disabled>Hang Up</button>
-            </div>
-            <div class="audio-container">
-                <div class="audio-box">
-                    <h3>Your Audio</h3>
-                    <audio id="localAudio" muted></audio>
-                    <div class="visualizer" id="localVisualizer"></div>
-                </div>
-                <div class="audio-box">
-                    <h3>Remote Audio</h3>
-                    <audio id="remoteAudio" autoplay></audio>
-                    <div class="visualizer" id="remoteVisualizer"></div>
-                </div>
-            </div>
-        </div>
-    </div>
+    <h1>Phòng Liên Lạc Bộ Đàm AI</h1>
+    <p>Mở 2 tab trình duyệt. Một tab chọn Người 1, tab kia chọn Người 2.</p>
+    
+    <button id="btnUser1">Đóng vai Người 1</button>
+    <button id="btnUser2">Đóng vai Người 2</button>
+    
+    <div id="status">Chưa kết nối...</div>
+    <audio id="audioOutput" autoplay></audio>
 
     <script>
-        // State
-        let roomId = null;
-        let userId = null;
-        let isCaller = false;
-        let pc = null;
-        let localStream = null;
-        let pollingInterval = null;
-        let iceCandidatesQueue = [];
+        const audioEl = document.getElementById('audioOutput');
+        const statusEl = document.getElementById('status');
+        let pc = new RTCPeerConnection();
 
-        // DOM Elements
-        const createRoomBtn = document.getElementById('createRoomBtn');
-        const joinRoomBtn = document.getElementById('joinRoomBtn');
-        const roomIdInput = document.getElementById('roomIdInput');
-        const roomInfo = document.getElementById('roomInfo');
-        const roomIdDisplay = document.getElementById('roomIdDisplay');
-        const statusBox = document.getElementById('statusBox');
-        const callControls = document.getElementById('callControls');
-        const startCallBtn = document.getElementById('startCallBtn');
-        const hangupBtn = document.getElementById('hangupBtn');
-        const localAudio = document.getElementById('localAudio');
-        const remoteAudio = document.getElementById('remoteAudio');
-
-        // Utility
-        function showStatus(msg, type = 'info') {
-            statusBox.textContent = msg;
-            statusBox.className = `status ${type}`;
-            statusBox.classList.remove('hidden');
-        }
-
-        // API calls
-        async function api(endpoint, method = 'GET', body = null) {
-            const opts = { method, headers: { 'Content-Type': 'application/json' } };
-            if (body) opts.body = JSON.stringify(body);
-            const res = await fetch(`/api/${endpoint}`, opts);
-            return res.json();
-        }
-
-        // Create Room
-        createRoomBtn.onclick = async () => {
-            const data = await api('create-room', 'POST');
-            roomId = data.room_id;
-            const joinData = await api('join-room', 'POST', { room_id: roomId });
-            userId = joinData.user_id;
-            isCaller = joinData.is_caller;
-
-            roomIdDisplay.textContent = roomId;
-            roomInfo.classList.remove('hidden');
-            callControls.style.display = 'block';
-            showStatus('Room created! Waiting for another person to join...', 'info');
+        async function startCall(role) {
+            statusEl.innerText = "Đang cấu hình micro...";
             
-            startPolling();
-        };
+            // Bật AEC3 của trình duyệt, Tắt lọc ồn mặc định để nhường cho DeepFilterNet
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+            });
+            
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-        // Join Room
-        joinRoomBtn.onclick = async () => {
-            const inputId = roomIdInput.value.trim();
-            if (!inputId) {
-                showStatus('Please enter a Room ID', 'error');
-                return;
-            }
-
-            const data = await api('join-room', 'POST', { room_id: inputId });
-            if (data.error) {
-                showStatus(data.error, 'error');
-                return;
-            }
-
-            roomId = inputId;
-            userId = data.user_id;
-            isCaller = data.is_caller;
-
-            roomIdDisplay.textContent = roomId;
-            roomInfo.classList.remove('hidden');
-            callControls.style.display = 'block';
-            showStatus(`Joined room as ${isCaller ? 'caller' : 'callee'}. ${isCaller ? 'Start the call!' : 'Wait for caller to start...'}`, 'success');
-
-            startPolling();
-        };
-
-        // Start Call
-        startCallBtn.onclick = async () => {
-            try {
-                // Get user media
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                localAudio.srcObject = localStream;
-                setupVisualizer(localStream, 'localVisualizer');
-
-                // Create peer connection
-                pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-
-                // Add tracks
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-                // ICE candidates
-                pc.onicecandidate = async (event) => {
-                    if (event.candidate) {
-                        await api('ice-candidate', 'POST', {
-                            room_id: roomId,
-                            user_id: userId,
-                            candidate: event.candidate
-                        });
-                    }
-                };
-
-                // Remote stream
-                pc.ontrack = (event) => {
-                    remoteAudio.srcObject = event.streams[0];
-                    setupVisualizer(event.streams[0], 'remoteVisualizer');
-                    showStatus('Connected! Call in progress...', 'success');
-                };
-
-                pc.onconnectionstatechange = () => {
-                    if (pc.connectionState === 'connected') {
-                        showStatus('Call connected!', 'success');
-                    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                        showStatus('Call disconnected', 'warning');
-                    }
-                };
-
-                if (isCaller) {
-                    // Create and send offer
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    await api('offer', 'POST', {
-                        room_id: roomId,
-                        user_id: userId,
-                        sdp: offer.sdp,
-                        type: offer.type
-                    });
-                    showStatus('Calling... waiting for answer', 'info');
-                } else {
-                    // Wait for offer, then send answer
-                    showStatus('Waiting for offer...', 'info');
+            pc.addEventListener('track', (evt) => {
+                if (evt.track.kind === 'audio') {
+                    audioEl.srcObject = evt.streams[0];
+                    statusEl.innerText = `Đã kết nối thành công với tư cách: ${role}`;
                 }
+            });
 
-                startCallBtn.disabled = true;
-                hangupBtn.disabled = false;
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
 
-            } catch (err) {
-                showStatus('Error: ' + err.message, 'error');
-                console.error(err);
-            }
-        };
+            const response = await fetch('/offer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type,
+                    role: role 
+                })
+            });
 
-        // Hang up
-        hangupBtn.onclick = async () => {
-            cleanup();
-            await api('leave-room', 'POST', { room_id: roomId, user_id: userId });
-            showStatus('Call ended', 'info');
-            startCallBtn.disabled = false;
-            hangupBtn.disabled = true;
-        };
-
-        function cleanup() {
-            if (pc) { pc.close(); pc = null; }
-            if (localStream) {
-                localStream.getTracks().forEach(t => t.stop());
-                localStream = null;
-            }
-            if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+            const answer = await response.json();
+            await pc.setRemoteDescription(answer);
         }
 
-        // Polling for signaling
-        function startPolling() {
-            let processedCandidates = new Set();
-
-            pollingInterval = setInterval(async () => {
-                if (!roomId || !userId) return;
-
-                try {
-                    // Check room status
-                    const roomStatus = await api(`check-room?room_id=${roomId}&user_id=${userId}`);
-                    
-                    if (roomStatus.users_count === 2 && !pc) {
-                        showStatus('Another person joined! Start the call.', 'success');
-                    }
-
-                    // If we're callee and there's an offer
-                    if (!isCaller && pc && !pc.remoteDescription) {
-                        const offerData = await api(`offer?room_id=${roomId}&user_id=${userId}`);
-                        if (offerData.sdp) {
-                            await pc.setRemoteDescription(new RTCSessionDescription({
-                                sdp: offerData.sdp,
-                                type: offerData.type
-                            }));
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            await api('answer', 'POST', {
-                                room_id: roomId,
-                                user_id: userId,
-                                sdp: answer.sdp,
-                                type: answer.type
-                            });
-                            showStatus('Answered call, connecting...', 'info');
-                        }
-                    }
-
-                    // If we're caller and waiting for answer
-                    if (isCaller && pc && pc.localDescription && !pc.remoteDescription) {
-                        const answerData = await api(`answer?room_id=${roomId}&user_id=${userId}`);
-                        if (answerData.sdp) {
-                            await pc.setRemoteDescription(new RTCSessionDescription({
-                                sdp: answerData.sdp,
-                                type: answerData.type
-                            }));
-                            showStatus('Answer received, connecting...', 'info');
-                        }
-                    }
-
-                    // Get ICE candidates
-                    if (pc && pc.remoteDescription) {
-                        const iceData = await api(`ice-candidates?room_id=${roomId}&user_id=${userId}`);
-                        for (const candidate of iceData.candidates || []) {
-                            const key = JSON.stringify(candidate);
-                            if (!processedCandidates.has(key)) {
-                                processedCandidates.add(key);
-                                try {
-                                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                                } catch (e) {
-                                    console.warn('ICE candidate error:', e);
-                                }
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error('Polling error:', e);
-                }
-            }, 1000);
-        }
-
-        // Audio visualizer
-        function setupVisualizer(stream, containerId) {
-            const container = document.getElementById(containerId);
-            container.innerHTML = '';
-            
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const analyser = audioCtx.createAnalyser();
-            const source = audioCtx.createMediaStreamSource(stream);
-            source.connect(analyser);
-            analyser.fftSize = 32;
-            
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            
-            for (let i = 0; i < 8; i++) {
-                const bar = document.createElement('div');
-                bar.className = 'bar';
-                bar.style.height = '5px';
-                container.appendChild(bar);
-            }
-            
-            const bars = container.querySelectorAll('.bar');
-            
-            function draw() {
-                requestAnimationFrame(draw);
-                analyser.getByteFrequencyData(dataArray);
-                bars.forEach((bar, i) => {
-                    const value = dataArray[i * 2] || 0;
-                    bar.style.height = Math.max(5, value / 4) + 'px';
-                });
-            }
-            draw();
-        }
-
-        // Cleanup on page unload
-        window.onbeforeunload = () => {
-            cleanup();
-            if (roomId && userId) {
-                navigator.sendBeacon('/api/leave-room', JSON.stringify({ room_id: roomId, user_id: userId }));
-            }
-        };
+        document.getElementById('btnUser1').onclick = () => startCall('user1');
+        document.getElementById('btnUser2').onclick = () => startCall('user2');
     </script>
 </body>
 </html>
