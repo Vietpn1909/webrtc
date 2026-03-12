@@ -106,8 +106,4 @@ Mô hình khởi tạo một lần khi server chạy và giữ trạng thái (`d
 
 ---
 
-## ✅ Ưu điểm & Lưu ý
-- Khử vọng âm hiệu quả ngay cả khi cả hai nói cùng lúc.
-- Giảm nhiễu môi trường giúp chất lượng rõ ràng.
-- Hoạt động realtime, phù hợp giao tiếp song phương.
 
