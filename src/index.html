@@ -2,60 +2,167 @@
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <title>Bộ đàm AI - DeepFilterNet</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Audio Hub - DeepFilterNet</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-        button { padding: 15px 30px; font-size: 16px; margin: 10px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; }
-        #status { margin-top: 20px; font-weight: bold; color: green; }
+        :root {
+            --primary: #00d2ff;
+            --secondary: #3a7bd5;
+            --bg: #0f172a;
+            --card: #1e293b;
+            --text: #f8fafc;
+        }
+        body { 
+            font-family: 'Outfit', sans-serif; 
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .container {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            padding: 3rem;
+            border-radius: 24px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            max-width: 500px;
+            width: 90%;
+        }
+        h1 { margin-bottom: 0.5rem; font-weight: 600; background: linear-gradient(to right, #00d2ff, #3a7bd5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        p { color: #94a3b8; margin-bottom: 2rem; }
+        .btn-group { display: flex; gap: 1rem; justify-content: center; margin-bottom: 2rem; }
+        button { 
+            padding: 12px 24px; 
+            font-size: 16px; 
+            font-weight: 600;
+            cursor: pointer; 
+            background: linear-gradient(to right, #00d2ff, #3a7bd5); 
+            color: white; 
+            border: none; 
+            border-radius: 12px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3);
+        }
+        button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0, 210, 255, 0.4); }
+        button:active { transform: translateY(0); }
+        button:disabled { background: #475569; cursor: not-allowed; box-shadow: none; }
+        
+        #status { 
+            margin-top: 20px; 
+            font-size: 14px;
+            padding: 10px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            color: #38bdf8;
+        }
+        .error { color: #f87171 !important; background: rgba(248, 113, 113, 0.1) !important; }
+        
+        .pulse {
+            width: 12px; height: 12px; background: #22c55e; border-radius: 50%;
+            display: inline-block; margin-right: 8px;
+            animation: pulse-animation 2s infinite;
+        }
+        @keyframes pulse-animation {
+            0% { box-shadow: 0 0 0 0px rgba(34, 197, 94, 0.7); }
+            100% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+        }
     </style>
 </head>
 <body>
-    <h1>Phòng Liên Lạc Bộ Đàm AI</h1>
-    <p>Mở 2 tab trình duyệt. Một tab chọn Người 1, tab kia chọn Người 2.</p>
+    <div class="container">
+        <h1>AI Audio Hub</h1>
+        <p>Hệ thống bộ đàm khử vọng sử dụng DeepFilterNet 3</p>
+        
+        <div class="btn-group">
+            <button id="btnUser1">Tôi là Người 1</button>
+            <button id="btnUser2">Tôi là Người 2</button>
+        </div>
+        
+        <div id="status">Sẵn sàng kết nối...</div>
+    </div>
     
-    <button id="btnUser1">Đóng vai Người 1</button>
-    <button id="btnUser2">Đóng vai Người 2</button>
-    
-    <div id="status">Chưa kết nối...</div>
     <audio id="audioOutput" autoplay></audio>
 
     <script>
         const audioEl = document.getElementById('audioOutput');
         const statusEl = document.getElementById('status');
-        let pc = new RTCPeerConnection();
+        const btns = [document.getElementById('btnUser1'), document.getElementById('btnUser2')];
+        let pc = null;
 
         async function startCall(role) {
-            statusEl.innerText = "Đang cấu hình micro...";
-            
-            // Bật AEC3 của trình duyệt, Tắt lọc ồn mặc định để nhường cho DeepFilterNet
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
-            });
-            
-            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+            try {
+                btns.forEach(b => b.disabled = true);
+                statusEl.innerText = "🔍 Đang tìm thiết bị micro...";
+                console.log("Khởi tạo cuộc gọi cho vai trò:", role);
 
-            pc.addEventListener('track', (evt) => {
-                if (evt.track.kind === 'audio') {
-                    audioEl.srcObject = evt.streams[0];
-                    statusEl.innerText = `Đã kết nối thành công với tư cách: ${role}`;
-                }
-            });
+                // Khởi tạo mới connection mỗi lần bấm
+                if (pc) pc.close();
+                pc = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
 
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
+                // Yêu cầu quyền Micro với các tham số đơn giản nhất để tránh treo
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: true // Thử đơn giản nhất trước
+                }).catch(err => {
+                    console.error("GUM Error:", err);
+                    throw new Error("Không thể truy cập Micro. Hãy kiểm tra quyền truy cập ở địa chỉ trình duyệt hoặc kết nối Micro.");
+                });
 
-            const response = await fetch('/offer', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    sdp: pc.localDescription.sdp,
-                    type: pc.localDescription.type,
-                    role: role 
-                })
-            });
+                statusEl.innerText = "📡 Đang thiết lập đường truyền WebRTC...";
+                console.log("Đã nhận stream micro.");
+                
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-            const answer = await response.json();
-            await pc.setRemoteDescription(answer);
+                pc.addEventListener('track', (evt) => {
+                    console.log("Đã nhận được luồng âm thanh từ server");
+                    if (evt.track.kind === 'audio') {
+                        audioEl.srcObject = evt.streams[0];
+                        statusEl.innerHTML = `<span class="pulse"></span> Đã kết nối: <strong>${role}</strong>`;
+                    }
+                });
+
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    console.log("ICE State:", pc.iceConnectionState);
+                    if (pc.iceConnectionState === 'failed') {
+                        statusEl.innerText = "❌ Lỗi kết nối mạng (ICE Failed)";
+                    }
+                });
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                console.log("Gửi SDP Offer tới server...");
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type,
+                        role: role 
+                    })
+                });
+
+                if (!response.ok) throw new Error("Server không phản hồi yêu cầu kết nối.");
+
+                const answer = await response.json();
+                console.log("Đã nhận SDP Answer từ server.");
+                await pc.setRemoteDescription(answer);
+
+            } catch (err) {
+                console.error(err);
+                statusEl.innerText = "⚠️ Lỗi: " + err.message;
+                statusEl.classList.add('error');
+                btns.forEach(b => b.disabled = false);
+            }
         }
 
         document.getElementById('btnUser1').onclick = () => startCall('user1');
