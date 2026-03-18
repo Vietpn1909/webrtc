@@ -4,19 +4,19 @@ import numpy as np
 import torch
 import logging
 import ssl
+import os
+import subprocess
+from fractions import Fraction  # Cần thiết để sửa lỗi time_base
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import AudioFrame
 
-# Cấu hình logging để dễ debug
+# Cấu hình logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webrtc")
 
-# === BẢN VÁ LỖI HỆ THỐNG / GIT ===
+# === BẢN VÁ LỖI HỆ THỐNG / GIT (Dành cho Windows) ===
 import df.utils
-import subprocess
-
-# Chặn đứng các lời gọi git gây lỗi CreateProcess trên Windows
 df.utils.get_commit_hash = lambda *args, **kwargs: "unknown"
 df.utils.get_git_root = lambda *args, **kwargs: "unknown"
 
@@ -40,28 +40,24 @@ def _patched_popen(args, *pargs, **kwargs):
             def kill(self): pass
         return DummyProcess(args)
 subprocess.Popen = _patched_popen
-# ===============================
 
 from df.enhance import init_df, enhance
 
+# === KHỞI TẠO MÔ HÌNH VÀ BIẾN TOÀN CỤC ===
 print("Đang nạp mô hình DeepFilterNet3...")
-# Nạp model chung nhưng tạo 2 state riêng cho 2 người để tránh nhiễu/treo
 df_model, state_user1, _ = init_df()
 _, state_user2, _ = init_df()
 
-states = {
-    'user1': state_user1,
-    'user2': state_user2
-}
+states = {'user1': state_user1, 'user2': state_user2}
+room_tracks = {'user1': None, 'user2': None}
+pcs = set()
 
-# Biến lưu trữ track gốc từ WebRTC
-room_tracks = {
-    'user1': None,
-    'user2': None
-}
+# === TỐI ƯU HÓA LATENCY ===
+# Set ENABLE_AI_PROCESSING = False để test latency baseline (pass-through)
+# Set ENABLE_AI_PROCESSING = True để chạy DeepFilterNet (khử nhiễu nhưng có latency cao)
+ENABLE_AI_PROCESSING = False
 
-# Bộ đệm toàn cục lưu lại 0.5 giây âm thanh gần nhất của mỗi người
-BUFFER_SIZE = 24000 
+BUFFER_SIZE = 48000 # Tăng buffer lên 1 giây để an toàn hơn với frame size động
 audio_history = {
     'user1': np.zeros(BUFFER_SIZE, dtype=np.float32),
     'user2': np.zeros(BUFFER_SIZE, dtype=np.float32)
@@ -75,161 +71,210 @@ def calculate_delay_gcc_phat(mic_sig, ref_sig):
     cc = np.fft.irfft(R / (np.abs(R) + 1e-15), n=n)
     max_shift = int(n / 2)
     cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
-    shift = np.argmax(np.abs(cc)) - max_shift
-    return shift
+    return np.argmax(np.abs(cc)) - max_shift
 
 class AIFilterTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, my_role):
+    def __init__(self, role_to_process):
         super().__init__()
-        self.my_role = my_role
-        self.partner_role = 'user2' if my_role == 'user1' else 'user1'
-        self.frame_size = 480  
+        self.role_to_process = role_to_process
+        self.partner_role = 'user2' if role_to_process == 'user1' else 'user1'
         self.frame_counter = 0
         self.cached_shift = 0
         self._pts = 0
-        self.df_state = states[my_role]
+        self._logged_audio_meta = False
+        self.df_state = states[role_to_process]
 
     async def recv(self):
-        my_mic_track = room_tracks.get(self.my_role)
-        if not my_mic_track:
-            await asyncio.sleep(0.01)
+        source_track = room_tracks.get(self.role_to_process)
+        
+        if not source_track:
+            await asyncio.sleep(0.02)
             return self._create_silent_frame()
 
         try:
-            my_frame = await my_mic_track.recv()
+            frame = await source_track.recv()
         except Exception as e:
-            logger.warning(f"Lỗi khi nhận frame từ {self.my_role}: {e}")
+            logger.warning(f"Lỗi nhận frame từ {self.role_to_process}: {e}")
             return self._create_silent_frame()
 
-        # Chuyển đổi audio sang float32 để xử lý
-        my_audio = my_frame.to_ndarray().astype(np.float32) / 32768.0
-        
-        # Cập nhật lịch sử âm thanh của chính mình (để người kia dùng làm mẫu triệt tiêu vọng)
-        audio_history[self.my_role] = np.roll(audio_history[self.my_role], -self.frame_size)
-        audio_history[self.my_role][-self.frame_size:] = my_audio[0]
+        # 1. Chuyển đổi audio sang float32 với chuẩn hóa đúng theo dtype thực tế.
+        audio_ndarray = frame.to_ndarray()
+        if not self._logged_audio_meta:
+            logger.info(
+                f"[{self.role_to_process}] frame format={frame.format.name}, layout={frame.layout.name}, "
+                f"shape={audio_ndarray.shape}, dtype={audio_ndarray.dtype}, sample_rate={frame.sample_rate}"
+            )
+            self._logged_audio_meta = True
 
-        my_tensor = torch.from_numpy(my_audio)
-        partner_track = room_tracks.get(self.partner_role)
-        self.frame_counter += 1
+        if np.issubdtype(audio_ndarray.dtype, np.integer):
+            max_val = float(np.iinfo(audio_ndarray.dtype).max)
+            audio_float = audio_ndarray.astype(np.float32) / max_val
+        else:
+            audio_float = np.clip(audio_ndarray.astype(np.float32), -1.0, 1.0)
 
-        # Chạy xử lý DeepFilterNet trong thread riêng để không làm treo event loop của WebRTC
-        clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, partner_track)
+        # 2. Downmix về mono ổn định cho cả packed/planar.
+        if audio_float.ndim == 1:
+            data_to_store = audio_float
+        elif audio_float.ndim == 2:
+            if audio_float.shape[0] <= 8 and audio_float.shape[1] > audio_float.shape[0]:
+                data_to_store = np.mean(audio_float, axis=0)
+            else:
+                data_to_store = np.mean(audio_float, axis=1)
+        else:
+            data_to_store = audio_float.reshape(-1)
 
-        # Chuyển về định dạng int16 cho WebRTC
-        clean_audio = (clean_tensor.squeeze().numpy() * 32768.0).astype(np.int16)
-        clean_audio = clean_audio.reshape(1, -1)
+        data_to_store = np.ascontiguousarray(data_to_store, dtype=np.float32)
+            
+        current_samples = data_to_store.shape[0]
+
+        # 3. Cập nhật lịch sử (Sửa lỗi Broadcast tại đây)
+        # Sử dụng slice động dựa trên chính kích thước của data_to_store
+        audio_history[self.role_to_process] = np.roll(audio_history[self.role_to_process], -current_samples)
+        audio_history[self.role_to_process][-current_samples:] = data_to_store
+
+        # 4. Chạy AI trong thread riêng
+        # Đảm bảo tensor có hình dạng đúng (1, samples)
+        my_tensor = torch.from_numpy(data_to_store).unsqueeze(0)
+        clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
+
+        # 5. Trả về frame (Đảm bảo định dạng int16 mono)
+        clean_audio_float = clean_tensor.squeeze().detach().cpu().numpy().astype(np.float32)
+
+        # Trộn nhẹ tín hiệu gốc để giảm cảm giác "kim loại" khi khử nhiễu mạnh.
+        dry_wet_mix = 0.55
+        mixed_audio_float = (1.0 - dry_wet_mix) * clean_audio_float + dry_wet_mix * data_to_store
+
+        # Chống clipping trước khi đổi sang int16 để tránh méo tiếng.
+        mixed_audio_float = np.clip(mixed_audio_float, -0.95, 0.95)
+        clean_audio_array = (mixed_audio_float * 32768.0).astype(np.int16)
+        clean_audio_array = clean_audio_array.reshape(1, -1)
         
-        new_frame = AudioFrame.from_ndarray(clean_audio, format='s16', layout='mono')
-        new_frame.pts = my_frame.pts
-        new_frame.sample_rate = my_frame.sample_rate
-        new_frame.time_base = my_frame.time_base
-        
+        new_frame = AudioFrame.from_ndarray(clean_audio_array, format='s16', layout='mono')
+        new_frame.pts = frame.pts
+        new_frame.sample_rate = frame.sample_rate
+        new_frame.time_base = frame.time_base
         return new_frame
-
-    def _process_audio(self, my_tensor, partner_track):
-        # Thuật toán triệt tiêu vọng (AEC) sử dụng DeepFilterNet 3
-        if partner_track:
-            partner_history = audio_history[self.partner_role]
-            if np.max(np.abs(partner_history[-4800:])) > 0.01: 
-                if self.frame_counter % 50 == 0:
-                    my_recent = audio_history[self.my_role][-8000:]
-                    partner_recent = partner_history[-8000:]
-                    self.cached_shift = calculate_delay_gcc_phat(my_recent, partner_recent)
-                
-                start_idx = BUFFER_SIZE - self.frame_size + self.cached_shift
-                if 0 <= start_idx <= BUFFER_SIZE - self.frame_size:
-                    aligned_partner_audio = partner_history[start_idx : start_idx + self.frame_size]
-                    partner_tensor = torch.from_numpy(aligned_partner_audio).unsqueeze(0)
-                    return enhance(df_model, self.df_state, my_tensor, attn_state=partner_tensor)
+    
+    def _process_audio(self, my_tensor, current_samples):
+        # Nếu ENABLE_AI_PROCESSING = False, chỉ pass-through không xử lý để test latency.
+        if not ENABLE_AI_PROCESSING:
+            return my_tensor
         
-        return enhance(df_model, self.df_state, my_tensor)
+        self.frame_counter += 1
+        partner_track = room_tracks.get(self.partner_role)
+        
+        if partner_track:
+            partner_hist = audio_history[self.partner_role]
+            # Kiểm tra nếu đối phương đang nói (AEC)
+            if np.max(np.abs(partner_hist[-4800:])) > 0.01:
+                if self.frame_counter % 20 == 0: # Cập nhật độ trễ thường xuyên hơn
+                    self.cached_shift = calculate_delay_gcc_phat(audio_history[self.role_to_process][-8000:], partner_hist[-8000:])
+                
+                start_idx = BUFFER_SIZE - current_samples + self.cached_shift
+                if 0 <= start_idx <= BUFFER_SIZE - current_samples:
+                    ref_audio = partner_hist[start_idx : start_idx + current_samples]
+                    # DeepFilterNet enhance() bản hiện tại không hỗ trợ attn_state.
+                    # Giữ nhánh AEC để có thể mở rộng sau, nhưng fallback sang enhance chuẩn.
+                    _ = ref_audio
+                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=8.0)
+        
+        return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=8.0)
 
     def _create_silent_frame(self):
-        silent_audio = np.zeros((1, 480), dtype=np.int16)
-        frame = AudioFrame.from_ndarray(silent_audio, format='s16', layout='mono')
+        # Sửa lỗi AttributeError bằng Fraction
+        samples = 480
+        frame = AudioFrame.from_ndarray(np.zeros((1, samples), dtype=np.int16), format='s16', layout='mono')
         frame.sample_rate = 48000
         frame.pts = self._pts
-        self._pts += 480
-        frame.time_base = 1/48000
+        frame.time_base = Fraction(1, 48000)
+        self._pts += samples
         return frame
 
-import os
+# Tạo sẵn các track đầu ra
+filtered_outputs = {
+    'user1': AIFilterTrack('user1'),
+    'user2': AIFilterTrack('user2')
+}
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 async def index(request):
     try:
         content = open(os.path.join(BASE_DIR, "index.html"), "r", encoding="utf-8").read()
         return web.Response(content_type="text/html", text=content)
-    except Exception as e:
-        return web.Response(status=500, text=str(e))
+    except:
+        return web.Response(status=404, text="Không tìm thấy index.html")
 
 async def offer(request):
     params = await request.json()
     role = params['role']
-    logger.info(f"--> [Server] Nhận yêu cầu kết nối từ: {role}")
-    
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-    pc = RTCPeerConnection()
-
-    # Xác định người kia là ai để lấy âm thanh của họ gửi cho người này
     partner_role = 'user2' if role == 'user1' else 'user1'
-    # Tạo track âm thanh (đã lọc AI) để gửi lại cho người đang gọi
-    outgoing_track = AIFilterTrack(my_role=partner_role)
-    pc.addTrack(outgoing_track)
+    
+    logger.info(f"--> [Server] {role} kết nối.")
+    pc = RTCPeerConnection()
+    pcs.add(pc)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            logger.info(f"[{role}] Đã nhận luồng micro từ trình duyệt.")
+            logger.info(f"[{role}] Micro stream active.")
             room_tracks[role] = track
+
+    # Gửi track đã qua xử lý của đối phương cho người này
+    pc.addTrack(filtered_outputs[partner_role])
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        logger.info(f"[{role}] Trạng thái kết nối: {pc.connectionState}")
+        logger.info(f"[{role}] Connection: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
             room_tracks[role] = None
-            await pc.close()
+            pcs.discard(pc)
 
-    await pc.setRemoteDescription(offer)
+    @pc.on("iceconnectionstatechange")
+    async def on_iceconnectionstatechange():
+        if pc.iceConnectionState in ["failed", "closed", "disconnected"]:
+            room_tracks[role] = None
+
+    @pc.on("signalingstatechange")
+    async def on_signalingstatechange():
+        if pc.signalingState == "closed":
+            pcs.discard(pc)
+
+    await pc.setRemoteDescription(RTCSessionDescription(sdp=params["sdp"], type=params["type"]))
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # Đợi thu thập xong các ứng viên ICE (mạng) để trình duyệt không bị treo khi kết nối
-    # Điều này cực kỳ quan trọng đối với các trình duyệt Chromium như Cốc Cốc
-    import asyncio
     timeout = 5
     while pc.iceGatheringState != "complete" and timeout > 0:
-        await asyncio.sleep(0.2)
-        timeout -= 0.2
+        await asyncio.sleep(0.1)
+        timeout -= 0.1
 
-    logger.info(f"<-- [Server] Gửi phản hồi (Answer) tới: {role}")
     return web.Response(
         content_type="application/json",
         text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
     )
 
+async def on_shutdown(app):
+    # Đóng toàn bộ peer connection trước khi event loop dừng.
+    if pcs:
+        await asyncio.gather(*[pc.close() for pc in list(pcs)], return_exceptions=True)
+    pcs.clear()
+    room_tracks['user1'] = None
+    room_tracks['user2'] = None
+
 if __name__ == "__main__":
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_post("/offer", offer)
+    app.on_shutdown.append(on_shutdown)
     
-    # Hỗ trợ HTTPS nếu có chứng chỉ
-    ssl_context = None
-    cert_path = os.path.join(BASE_DIR, "cert.pem")
-    key_path = os.path.join(BASE_DIR, "key.pem")
+    cert, key = os.path.join(BASE_DIR, "cert.pem"), os.path.join(BASE_DIR, "key.pem")
+    ssl_ctx = None
+    if os.path.exists(cert) and os.path.exists(key):
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(cert, key)
+        logger.info("HTTPS Enabled")
     
-    if os.path.exists(cert_path) and os.path.exists(key_path):
-        try:
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_context.load_cert_chain(cert_path, key_path)
-            logger.info("Đã kích hoạt HTTPS mode")
-        except Exception as e:
-            logger.warning(f"Lỗi khi nạp SSL: {e}")
-            ssl_context = None
-    else:
-        logger.warning("Không tìm thấy cert.pem/key.pem, chạy ở chế độ HTTP (chỉ localhost mới dùng được micro)")
-
-    logger.info("🚀 Server DeepFilter SFU đang khởi động tại cổng 8080")
-    web.run_app(app, port=8080, ssl_context=ssl_context)
+    web.run_app(app, port=8080, ssl_context=ssl_ctx)
