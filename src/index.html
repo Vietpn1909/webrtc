@@ -136,8 +136,6 @@
         document.getElementById("btnUser2"),
       ];
       let pc = null;
-
-      // Với Vercel, đặt biến môi trường `BACKEND_URL` trong Settings -> Environment Variables (ví dụ https://your-render-app.onrender.com)
       const BACKEND_URL = window.__env?.BACKEND_URL ||
         (window.location.hostname.includes("localhost")
           ? "http://localhost:8080"
