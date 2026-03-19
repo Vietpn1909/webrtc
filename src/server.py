@@ -55,7 +55,17 @@ pcs = set()
 # === TỐI ƯU HÓA LATENCY ===
 # Set ENABLE_AI_PROCESSING = False để test latency baseline (pass-through)
 # Set ENABLE_AI_PROCESSING = True để chạy DeepFilterNet (khử nhiễu nhưng có latency cao)
-ENABLE_AI_PROCESSING = False
+ENABLE_AI_PROCESSING = True
+
+# === TINH CHỈNH CHẤT LƯỢNG ÂM THANH ===
+# Mức khử nhiễu thấp hơn để giảm méo "kim loại".
+DF_ATTEN_LIM_DB = 4.0
+# Giữ nhiều tín hiệu gốc hơn để tiếng tự nhiên hơn.
+DRY_SIGNAL_RATIO = 0.8
+# Làm mượt biên frame để giảm rè/xé tiếng tại ranh giới frame.
+CROSSFADE_MS = 5
+# Tạm tắt nhánh tham chiếu đối phương vì dễ tạo artifact khi estimate delay lệch.
+ENABLE_PARTNER_REFERENCE = False
 
 BUFFER_SIZE = 48000 # Tăng buffer lên 1 giây để an toàn hơn với frame size động
 audio_history = {
@@ -85,6 +95,7 @@ class AIFilterTrack(MediaStreamTrack):
         self._pts = 0
         self._logged_audio_meta = False
         self.df_state = states[role_to_process]
+        self._prev_tail = np.zeros(0, dtype=np.float32)
 
     async def recv(self):
         source_track = room_tracks.get(self.role_to_process)
@@ -109,16 +120,22 @@ class AIFilterTrack(MediaStreamTrack):
             self._logged_audio_meta = True
 
         if np.issubdtype(audio_ndarray.dtype, np.integer):
-            max_val = float(np.iinfo(audio_ndarray.dtype).max)
+            info = np.iinfo(audio_ndarray.dtype)
+            max_val = float(max(abs(info.min), info.max))
             audio_float = audio_ndarray.astype(np.float32) / max_val
         else:
             audio_float = np.clip(audio_ndarray.astype(np.float32), -1.0, 1.0)
 
-        # 2. Downmix về mono ổn định cho cả packed/planar.
+        # 2. Downmix về mono theo số kênh thực tế thay vì đoán shape.
+        channel_count = len(frame.layout.channels) if frame.layout else 1
         if audio_float.ndim == 1:
             data_to_store = audio_float
         elif audio_float.ndim == 2:
-            if audio_float.shape[0] <= 8 and audio_float.shape[1] > audio_float.shape[0]:
+            if audio_float.shape[0] == channel_count:
+                data_to_store = np.mean(audio_float, axis=0)
+            elif audio_float.shape[1] == channel_count:
+                data_to_store = np.mean(audio_float, axis=1)
+            elif audio_float.shape[0] < audio_float.shape[1]:
                 data_to_store = np.mean(audio_float, axis=0)
             else:
                 data_to_store = np.mean(audio_float, axis=1)
@@ -131,8 +148,11 @@ class AIFilterTrack(MediaStreamTrack):
 
         # 3. Cập nhật lịch sử (Sửa lỗi Broadcast tại đây)
         # Sử dụng slice động dựa trên chính kích thước của data_to_store
-        audio_history[self.role_to_process] = np.roll(audio_history[self.role_to_process], -current_samples)
-        audio_history[self.role_to_process][-current_samples:] = data_to_store
+        if current_samples >= BUFFER_SIZE:
+            audio_history[self.role_to_process] = data_to_store[-BUFFER_SIZE:]
+        else:
+            audio_history[self.role_to_process] = np.roll(audio_history[self.role_to_process], -current_samples)
+            audio_history[self.role_to_process][-current_samples:] = data_to_store
 
         # 4. Chạy AI trong thread riêng
         # Đảm bảo tensor có hình dạng đúng (1, samples)
@@ -143,8 +163,10 @@ class AIFilterTrack(MediaStreamTrack):
         clean_audio_float = clean_tensor.squeeze().detach().cpu().numpy().astype(np.float32)
 
         # Trộn nhẹ tín hiệu gốc để giảm cảm giác "kim loại" khi khử nhiễu mạnh.
-        dry_wet_mix = 0.55
-        mixed_audio_float = (1.0 - dry_wet_mix) * clean_audio_float + dry_wet_mix * data_to_store
+        mixed_audio_float = (DRY_SIGNAL_RATIO * data_to_store) + ((1.0 - DRY_SIGNAL_RATIO) * clean_audio_float)
+
+        # Crossfade đầu frame hiện tại với đuôi frame trước để giảm crackle.
+        mixed_audio_float = self._apply_crossfade(mixed_audio_float, frame.sample_rate or 48000)
 
         # Chống clipping trước khi đổi sang int16 để tránh méo tiếng.
         mixed_audio_float = np.clip(mixed_audio_float, -0.95, 0.95)
@@ -165,7 +187,7 @@ class AIFilterTrack(MediaStreamTrack):
         self.frame_counter += 1
         partner_track = room_tracks.get(self.partner_role)
         
-        if partner_track:
+        if partner_track and ENABLE_PARTNER_REFERENCE:
             partner_hist = audio_history[self.partner_role]
             # Kiểm tra nếu đối phương đang nói (AEC)
             if np.max(np.abs(partner_hist[-4800:])) > 0.01:
@@ -178,9 +200,22 @@ class AIFilterTrack(MediaStreamTrack):
                     # DeepFilterNet enhance() bản hiện tại không hỗ trợ attn_state.
                     # Giữ nhánh AEC để có thể mở rộng sau, nhưng fallback sang enhance chuẩn.
                     _ = ref_audio
-                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=8.0)
+                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=DF_ATTEN_LIM_DB)
         
-        return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=8.0)
+        return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=DF_ATTEN_LIM_DB)
+
+    def _apply_crossfade(self, signal, sample_rate):
+        fade_samples = max(1, int((sample_rate * CROSSFADE_MS) / 1000))
+        signal = np.ascontiguousarray(signal, dtype=np.float32)
+
+        if self._prev_tail.size > 0:
+            n = min(fade_samples, self._prev_tail.size, signal.size)
+            if n > 0:
+                ramp = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
+                signal[:n] = self._prev_tail[-n:] * (1.0 - ramp) + signal[:n] * ramp
+
+        self._prev_tail = signal[-fade_samples:].copy()
+        return signal
 
     def _create_silent_frame(self):
         # Sửa lỗi AttributeError bằng Fraction
