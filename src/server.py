@@ -62,6 +62,8 @@ ENABLE_AI_PROCESSING = True
 DF_ATTEN_LIM_DB = 4.0
 # Giữ nhiều tín hiệu gốc hơn để tiếng tự nhiên hơn.
 DRY_SIGNAL_RATIO = 0.8
+# Nếu AI làm sụt năng lượng quá sâu so với đầu vào thì tự fallback để không mất tiếng.
+AI_MIN_RMS_RATIO = 0.05
 # Làm mượt biên frame để giảm rè/xé tiếng tại ranh giới frame.
 CROSSFADE_MS = 5
 # Tạm tắt nhánh tham chiếu đối phương vì dễ tạo artifact khi estimate delay lệch.
@@ -94,6 +96,7 @@ class AIFilterTrack(MediaStreamTrack):
         self.cached_shift = 0
         self._pts = 0
         self._logged_audio_meta = False
+        self._logged_level_once = False
         self.df_state = states[role_to_process]
         self._prev_tail = np.zeros(0, dtype=np.float32)
 
@@ -110,6 +113,10 @@ class AIFilterTrack(MediaStreamTrack):
             logger.warning(f"Lỗi nhận frame từ {self.role_to_process}: {e}")
             return self._create_silent_frame()
 
+        # Bypass thật sự để khoanh vùng lỗi pipeline xử lý.
+        if not ENABLE_AI_PROCESSING:
+            return frame
+
         # 1. Chuyển đổi audio sang float32 với chuẩn hóa đúng theo dtype thực tế.
         audio_ndarray = frame.to_ndarray()
         if not self._logged_audio_meta:
@@ -122,7 +129,11 @@ class AIFilterTrack(MediaStreamTrack):
         if np.issubdtype(audio_ndarray.dtype, np.integer):
             info = np.iinfo(audio_ndarray.dtype)
             max_val = float(max(abs(info.min), info.max))
-            audio_float = audio_ndarray.astype(np.float32) / max_val
+            audio_float = audio_ndarray.astype(np.float32)
+            # PCM unsigned (vd: uint8) có mức im lặng ở midpoint, cần trừ DC offset.
+            if info.min == 0:
+                audio_float = audio_float - ((info.max + 1) / 2.0)
+            audio_float = audio_float / max_val
         else:
             audio_float = np.clip(audio_ndarray.astype(np.float32), -1.0, 1.0)
 
@@ -131,7 +142,13 @@ class AIFilterTrack(MediaStreamTrack):
         if audio_float.ndim == 1:
             data_to_store = audio_float
         elif audio_float.ndim == 2:
-            if audio_float.shape[0] == channel_count:
+            # Trường hợp packed/interleaved: shape thường là (1, total_samples).
+            # Nếu có nhiều kênh, tách lại theo số kênh rồi mới trung bình về mono.
+            if audio_float.shape[0] == 1 and channel_count > 1 and (audio_float.shape[1] % channel_count == 0):
+                interleaved = audio_float.reshape(-1)
+                deinterleaved = interleaved.reshape(-1, channel_count)
+                data_to_store = np.mean(deinterleaved, axis=1)
+            elif audio_float.shape[0] == channel_count:
                 data_to_store = np.mean(audio_float, axis=0)
             elif audio_float.shape[1] == channel_count:
                 data_to_store = np.mean(audio_float, axis=1)
@@ -157,10 +174,35 @@ class AIFilterTrack(MediaStreamTrack):
         # 4. Chạy AI trong thread riêng
         # Đảm bảo tensor có hình dạng đúng (1, samples)
         my_tensor = torch.from_numpy(data_to_store).unsqueeze(0)
-        clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
+        try:
+            clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
+        except Exception as e:
+            logger.exception(f"[{self.role_to_process}] AI processing lỗi, fallback passthrough: {e}")
+            return frame
 
         # 5. Trả về frame (Đảm bảo định dạng int16 mono)
         clean_audio_float = clean_tensor.squeeze().detach().cpu().numpy().astype(np.float32)
+        if clean_audio_float.shape[0] != current_samples:
+            logger.warning(
+                f"[{self.role_to_process}] AI trả sai chiều dữ liệu ({clean_audio_float.shape[0]} != {current_samples}), fallback gốc"
+            )
+            clean_audio_float = data_to_store
+
+        if not np.all(np.isfinite(clean_audio_float)):
+            logger.warning(f"[{self.role_to_process}] AI trả NaN/Inf, fallback gốc")
+            clean_audio_float = data_to_store
+
+        in_rms = float(np.sqrt(np.mean(np.square(data_to_store)) + 1e-12))
+        out_rms = float(np.sqrt(np.mean(np.square(clean_audio_float)) + 1e-12))
+        if in_rms > 1e-5 and (out_rms / in_rms) < AI_MIN_RMS_RATIO:
+            logger.warning(
+                f"[{self.role_to_process}] AI làm nhỏ tiếng quá mức (in_rms={in_rms:.6f}, out_rms={out_rms:.6f}), fallback gốc"
+            )
+            clean_audio_float = data_to_store
+
+        if not self._logged_level_once:
+            logger.info(f"[{self.role_to_process}] rms_in={in_rms:.6f}, rms_out={out_rms:.6f}, dry={DRY_SIGNAL_RATIO}")
+            self._logged_level_once = True
 
         # Trộn nhẹ tín hiệu gốc để giảm cảm giác "kim loại" khi khử nhiễu mạnh.
         mixed_audio_float = (DRY_SIGNAL_RATIO * data_to_store) + ((1.0 - DRY_SIGNAL_RATIO) * clean_audio_float)
@@ -170,12 +212,13 @@ class AIFilterTrack(MediaStreamTrack):
 
         # Chống clipping trước khi đổi sang int16 để tránh méo tiếng.
         mixed_audio_float = np.clip(mixed_audio_float, -0.95, 0.95)
-        clean_audio_array = (mixed_audio_float * 32768.0).astype(np.int16)
+        clean_audio_array = (mixed_audio_float * 32767.0).astype(np.int16)
         clean_audio_array = clean_audio_array.reshape(1, -1)
         
+        # PyAV hiện tại yêu cầu ndarray ndim=2 cho AudioFrame.from_ndarray.
         new_frame = AudioFrame.from_ndarray(clean_audio_array, format='s16', layout='mono')
         new_frame.pts = frame.pts
-        new_frame.sample_rate = frame.sample_rate
+        new_frame.sample_rate = frame.sample_rate or 48000
         new_frame.time_base = frame.time_base
         return new_frame
     
