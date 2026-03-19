@@ -1,0 +1,6 @@
+aiohttp
+aiortc
+av
+numpy
+torch
+deepfilter
