@@ -383,4 +383,5 @@ if __name__ == "__main__":
         ssl_ctx.load_cert_chain(cert, key)
         logger.info("HTTPS Enabled")
     
-    web.run_app(app, port=8080, ssl_context=ssl_ctx)
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host="0.0.0.0", port=port, ssl_context=ssl_ctx)

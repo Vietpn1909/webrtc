@@ -1,6 +1,6 @@
-aiohttp
-aiortc
-av
+aiohttp==3.9.5
+aiortc==1.6.0
+av==10.0.0
 numpy
 torch
-deepfilter
+deepfilternet
