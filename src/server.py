@@ -77,7 +77,21 @@ LOW_LATENCY_VAD_RMS = 0.008
 # Rút ngắn crossfade khi bật low-latency để giảm processing overhead.
 LOW_LATENCY_CROSSFADE_MS = 2
 
-BUFFER_SIZE = 48000 # Tăng buffer lên 1 giây để an toàn hơn với frame size động
+# === AGGRESSIVE LOW LATENCY (dành cho realtime call) ===
+# Bật để giảm độ trễ từ 2s xuống < 500ms, giá cả là khử nhiễu kém hơn.
+AGGRESSIVE_LOW_LATENCY = True
+
+# Buffer size sẽ tự điều chỉnh dựa trên chế độ:
+# - AGGRESSIVE: 4800 (100ms) để giảm trễ cực kỳ
+# - NORMAL: 48000 (1 giây) để giữ được lịch sử nếu dùng AEC
+if AGGRESSIVE_LOW_LATENCY:
+    BUFFER_SIZE = 4800
+    DF_ATTEN_LIM_DB = 1.0  # Giảm từ 4.0 để AI nhanh hơn
+    DRY_SIGNAL_RATIO = 0.95  # Giữ 95% tiếng gốc, chỉ 5% AI
+    CROSSFADE_MS = 1  # Giảm từ 5 để không block
+else:
+    BUFFER_SIZE = 48000
+    # DF_ATTEN_LIM_DB/DRY_SIGNAL_RATIO/CROSSFADE_MS giữ nguyên giá trị đã define ở trên
 audio_history = {
     'user1': np.zeros(BUFFER_SIZE, dtype=np.float32),
     'user2': np.zeros(BUFFER_SIZE, dtype=np.float32)
@@ -232,7 +246,8 @@ class AIFilterTrack(MediaStreamTrack):
             self._logged_level_once = True
 
         # Trộn nhẹ tín hiệu gốc để giảm cảm giác "kim loại" khi khử nhiễu mạnh.
-        mixed_audio_float = (DRY_SIGNAL_RATIO * data_to_store) + ((1.0 - DRY_SIGNAL_RATIO) * clean_audio_float)
+        dry_ratio = 0.95 if AGGRESSIVE_LOW_LATENCY else DRY_SIGNAL_RATIO
+        mixed_audio_float = (dry_ratio * data_to_store) + ((1.0 - dry_ratio) * clean_audio_float)
 
         # Crossfade đầu frame hiện tại với đuôi frame trước để giảm crackle.
         mixed_audio_float = self._apply_crossfade(mixed_audio_float, frame.sample_rate or 48000)
@@ -270,12 +285,19 @@ class AIFilterTrack(MediaStreamTrack):
                     # DeepFilterNet enhance() bản hiện tại không hỗ trợ attn_state.
                     # Giữ nhánh AEC để có thể mở rộng sau, nhưng fallback sang enhance chuẩn.
                     _ = ref_audio
-                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=DF_ATTEN_LIM_DB)
+                    atten_db = 1.0 if AGGRESSIVE_LOW_LATENCY else DF_ATTEN_LIM_DB
+                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=atten_db)
         
-        return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=DF_ATTEN_LIM_DB)
+        atten_db = 1.0 if AGGRESSIVE_LOW_LATENCY else DF_ATTEN_LIM_DB
+        return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=atten_db)
 
     def _apply_crossfade(self, signal, sample_rate):
-        effective_crossfade_ms = LOW_LATENCY_CROSSFADE_MS if LOW_LATENCY_MODE else CROSSFADE_MS
+        if AGGRESSIVE_LOW_LATENCY:
+            effective_crossfade_ms = 1
+        elif LOW_LATENCY_MODE:
+            effective_crossfade_ms = LOW_LATENCY_CROSSFADE_MS
+        else:
+            effective_crossfade_ms = CROSSFADE_MS
         fade_samples = max(1, int((sample_rate * effective_crossfade_ms) / 1000))
         signal = np.ascontiguousarray(signal, dtype=np.float32)
 
