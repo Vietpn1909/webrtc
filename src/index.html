@@ -137,6 +137,12 @@
       ];
       let pc = null;
 
+      // Với Vercel, đặt biến môi trường `BACKEND_URL` trong Settings -> Environment Variables (ví dụ https://your-render-app.onrender.com)
+      const BACKEND_URL = window.__env?.BACKEND_URL ||
+        (window.location.hostname.includes("localhost")
+          ? "http://localhost:8080"
+          : "https://your-render-app.onrender.com");
+
       async function startCall(role) {
         try {
           btns.forEach((b) => (b.disabled = true));
@@ -198,7 +204,7 @@
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
 
-          const response = await fetch("/offer", {
+          const response = await fetch(`${BACKEND_URL}/offer`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

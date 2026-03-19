@@ -8,6 +8,7 @@ import os
 import subprocess
 from fractions import Fraction  # Cần thiết để sửa lỗi time_base
 from aiohttp import web
+import aiohttp_cors
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import AudioFrame
 
@@ -397,12 +398,30 @@ if __name__ == "__main__":
     app.router.add_get("/", index)
     app.router.add_post("/offer", offer)
     app.on_shutdown.append(on_shutdown)
-    
+
+    # Enable CORS for frontend deployments (Vercel -> Render)
+    FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://your-vercel-app.vercel.app")
+
+    cors = aiohttp_cors.setup(app, defaults={
+        FRONTEND_ORIGIN: aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+        )
+    })
+
+    cors.add(app.router.add_resource("/offer")).add_route("POST", offer)
+    cors.add(app.router.add_resource("/")).add_route("GET", index)
+
     cert, key = os.path.join(BASE_DIR, "cert.pem"), os.path.join(BASE_DIR, "key.pem")
     ssl_ctx = None
     if os.path.exists(cert) and os.path.exists(key):
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.load_cert_chain(cert, key)
         logger.info("HTTPS Enabled")
-    
-    web.run_app(app, port=8080, ssl_context=ssl_ctx)
+
+    port = int(os.environ.get("PORT", 8080))
+    host = "0.0.0.0"
+
+    logger.info(f"Starting server on {host}:{port}")
+    web.run_app(app, host=host, port=port, ssl_context=ssl_ctx)

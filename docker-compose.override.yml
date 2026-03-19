@@ -1,0 +1,19 @@
+version: '3.8'
+
+# Development overrides
+services:
+  backend:
+    environment:
+      - LOG_LEVEL=DEBUG
+      - ENABLE_AI_PROCESSING=true
+    volumes:
+      # Mount source code for hot reload
+      - ./src:/app/src:ro
+    # Uncomment for development debugging
+    # command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "src/server.py"]
+
+  frontend:
+    volumes:
+      # Mount HTML for instant updates
+      - ./src/index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
