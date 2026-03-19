@@ -44,7 +44,93 @@ python -m http.server 3000
 # Truy cập http://localhost:3000
 ```
 
-## 🚀 Deploy Backend (Render)
+## � Deploy với Docker
+
+### Yêu cầu
+- Docker và Docker Compose
+- Docker Desktop (cho GPU support nếu cần)
+
+### 1. Chuẩn bị environment
+```bash
+cp .env.example .env
+# Edit .env với cấu hình của bạn
+```
+
+### 2. Build và chạy
+```bash
+# Quick start với script (Linux/Mac)
+./deploy.sh
+
+# Windows PowerShell:
+# .\deploy.sh
+
+# Hoặc dùng Make (Linux/Mac):
+make dev
+
+# Hoặc manual commands:
+docker-compose up --build
+```
+
+### 3. Truy cập
+- Frontend: http://localhost
+- Backend: http://localhost:8080
+- Health check: http://localhost/health
+
+### 3. Truy cập
+- Frontend: http://localhost
+- Backend: http://localhost:8080
+- Health check: http://localhost/health
+
+### 3. Truy cập
+- Frontend: http://localhost
+- Backend: http://localhost:8080
+- Health check: http://localhost/health
+
+### 3. Truy cập
+- Frontend: http://localhost
+- Backend: http://localhost:8080
+- Health check: http://localhost/health
+
+### 4. Logs và debug
+```bash
+# View logs
+docker-compose logs -f
+
+# View backend logs only
+docker-compose logs -f backend
+
+# Stop services
+docker-compose down
+
+# Rebuild sau khi thay đổi code
+docker-compose up --build --force-recreate
+```
+
+### 5. Production deployment
+```bash
+# Với custom domain
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# Scale backend (nếu cần multiple instances)
+docker-compose up -d --scale backend=2
+```
+
+### 6. GPU Support (tùy chọn)
+Để enable GPU cho DeepFilterNet:
+```yaml
+# Thêm vào docker-compose.yml
+services:
+  backend:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+## �🚀 Deploy Backend (Render)
 
 ### 1. Tạo tài khoản Render
 - Đăng ký tại [render.com](https://render.com)
@@ -156,6 +242,14 @@ curl https://your-render-app.onrender.com/
 - Check browser autoplay policy
 - Verify DeepFilterNet model loaded
 
+### Docker issues
+- **Build fails**: Check Docker Desktop running, đủ disk space
+- **Port conflicts**: Đảm bảo ports 80, 8080 không bị chiếm
+- **Memory issues**: Tăng Docker memory limit (4GB+ recommended)
+- **GPU not working**: Install NVIDIA Docker, check GPU drivers
+- **Model download fails**: Check internet connection, retry build
+- **Container exits immediately**: Check logs với `docker-compose logs backend`
+
 ## 📊 Performance
 
 ### Backend (Render)
@@ -179,6 +273,19 @@ curl https://your-render-app.onrender.com/
 - WebRTC yêu cầu HTTPS cho production
 - Test trên multiple browsers (Chrome, Firefox, Safari)
 - Monitor resource usage trên Render dashboard
+
+## 🛠️ Development Commands
+
+```bash
+# Quick commands với Make
+make help          # Show all available commands
+make build         # Build images
+make dev           # Start development
+make prod          # Start production
+make logs          # View logs
+make clean         # Clean up containers
+make test          # Run health checks
+```
 
 ## 🆘 Support
 
