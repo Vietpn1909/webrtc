@@ -69,6 +69,14 @@ CROSSFADE_MS = 5
 # Tạm tắt nhánh tham chiếu đối phương vì dễ tạo artifact khi estimate delay lệch.
 ENABLE_PARTNER_REFERENCE = False
 
+# === LOW LATENCY MODE (OPT-IN) ===
+# Mặc định tắt để giữ nguyên hành vi hiện tại đang ổn định.
+LOW_LATENCY_MODE = True
+# Khi bật low-latency: bỏ qua AI cho frame rất nhỏ năng lượng để giảm tải/độ trễ.
+LOW_LATENCY_VAD_RMS = 0.008
+# Rút ngắn crossfade khi bật low-latency để giảm processing overhead.
+LOW_LATENCY_CROSSFADE_MS = 2
+
 BUFFER_SIZE = 48000 # Tăng buffer lên 1 giây để an toàn hơn với frame size động
 audio_history = {
     'user1': np.zeros(BUFFER_SIZE, dtype=np.float32),
@@ -97,6 +105,7 @@ class AIFilterTrack(MediaStreamTrack):
         self._pts = 0
         self._logged_audio_meta = False
         self._logged_level_once = False
+        self._logged_low_latency_once = False
         self.df_state = states[role_to_process]
         self._prev_tail = np.zeros(0, dtype=np.float32)
 
@@ -112,10 +121,6 @@ class AIFilterTrack(MediaStreamTrack):
         except Exception as e:
             logger.warning(f"Lỗi nhận frame từ {self.role_to_process}: {e}")
             return self._create_silent_frame()
-
-        # Bypass thật sự để khoanh vùng lỗi pipeline xử lý.
-        if not ENABLE_AI_PROCESSING:
-            return frame
 
         # 1. Chuyển đổi audio sang float32 với chuẩn hóa đúng theo dtype thực tế.
         audio_ndarray = frame.to_ndarray()
@@ -160,6 +165,25 @@ class AIFilterTrack(MediaStreamTrack):
             data_to_store = audio_float.reshape(-1)
 
         data_to_store = np.ascontiguousarray(data_to_store, dtype=np.float32)
+
+        # Tối ưu tùy chọn: frame yếu năng lượng sẽ bỏ qua AI để giảm độ trễ.
+        # Chỉ chạy khi LOW_LATENCY_MODE = True nên mặc định không đổi hành vi.
+        if LOW_LATENCY_MODE:
+            frame_rms = float(np.sqrt(np.mean(np.square(data_to_store)) + 1e-12))
+            if frame_rms < LOW_LATENCY_VAD_RMS:
+                if not self._logged_low_latency_once:
+                    logger.info(
+                        f"[{self.role_to_process}] Low-latency passthrough active (rms={frame_rms:.6f} < {LOW_LATENCY_VAD_RMS})"
+                    )
+                    self._logged_low_latency_once = True
+                mixed_audio_float = self._apply_crossfade(data_to_store.copy(), frame.sample_rate or 48000)
+                mixed_audio_float = np.clip(mixed_audio_float, -0.95, 0.95)
+                clean_audio_array = (mixed_audio_float * 32767.0).astype(np.int16).reshape(1, -1)
+                new_frame = AudioFrame.from_ndarray(clean_audio_array, format='s16', layout='mono')
+                new_frame.pts = frame.pts
+                new_frame.sample_rate = frame.sample_rate or 48000
+                new_frame.time_base = frame.time_base
+                return new_frame
             
         current_samples = data_to_store.shape[0]
 
@@ -174,11 +198,14 @@ class AIFilterTrack(MediaStreamTrack):
         # 4. Chạy AI trong thread riêng
         # Đảm bảo tensor có hình dạng đúng (1, samples)
         my_tensor = torch.from_numpy(data_to_store).unsqueeze(0)
-        try:
-            clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
-        except Exception as e:
-            logger.exception(f"[{self.role_to_process}] AI processing lỗi, fallback passthrough: {e}")
-            return frame
+        if ENABLE_AI_PROCESSING:
+            try:
+                clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
+            except Exception as e:
+                logger.exception(f"[{self.role_to_process}] AI processing lỗi, fallback passthrough: {e}")
+                clean_tensor = my_tensor
+        else:
+            clean_tensor = my_tensor
 
         # 5. Trả về frame (Đảm bảo định dạng int16 mono)
         clean_audio_float = clean_tensor.squeeze().detach().cpu().numpy().astype(np.float32)
@@ -248,7 +275,8 @@ class AIFilterTrack(MediaStreamTrack):
         return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=DF_ATTEN_LIM_DB)
 
     def _apply_crossfade(self, signal, sample_rate):
-        fade_samples = max(1, int((sample_rate * CROSSFADE_MS) / 1000))
+        effective_crossfade_ms = LOW_LATENCY_CROSSFADE_MS if LOW_LATENCY_MODE else CROSSFADE_MS
+        fade_samples = max(1, int((sample_rate * effective_crossfade_ms) / 1000))
         signal = np.ascontiguousarray(signal, dtype=np.float32)
 
         if self._prev_tail.size > 0:
