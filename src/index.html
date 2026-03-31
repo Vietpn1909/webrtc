@@ -56,6 +56,30 @@
         justify-content: center;
         margin-bottom: 2rem;
       }
+      .toggle-group {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.6rem;
+        margin: 0 auto 1.5rem;
+        max-width: 320px;
+        text-align: left;
+      }
+      .toggle-item {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.5rem 0.7rem;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .toggle-item input {
+        transform: scale(1.1);
+      }
+      .toggle-item label {
+        color: #cbd5e1;
+        font-size: 14px;
+        user-select: none;
+      }
       button {
         padding: 12px 24px;
         font-size: 16px;
@@ -123,10 +147,25 @@
         <button id="btnUser2">Tôi là Người 2</button>
       </div>
 
+      <div class="toggle-group">
+        <div class="toggle-item">
+          <input type="checkbox" id="toggleAec" checked />
+          <label for="toggleAec">Echo Cancellation</label>
+        </div>
+        <div class="toggle-item">
+          <input type="checkbox" id="toggleNs" checked />
+          <label for="toggleNs">Noise Suppression</label>
+        </div>
+        <div class="toggle-item">
+          <input type="checkbox" id="toggleAgc" checked />
+          <label for="toggleAgc">Auto Gain Control</label>
+        </div>
+      </div>
+
       <div id="status">Sẵn sàng kết nối...</div>
     </div>
 
-    <audio id="audioOutput" autoplay></audio>
+    <audio id="audioOutput" autoplay playsinline></audio>
 
     <script>
       const audioEl = document.getElementById("audioOutput");
@@ -135,11 +174,48 @@
         document.getElementById("btnUser1"),
         document.getElementById("btnUser2"),
       ];
+      const toggleAec = document.getElementById("toggleAec");
+      const toggleNs = document.getElementById("toggleNs");
+      const toggleAgc = document.getElementById("toggleAgc");
       let pc = null;
       const BACKEND_URL = window.__env?.BACKEND_URL ||
         (window.location.hostname.includes("localhost")
           ? "http://localhost:8080"
           : "https://your-render-app.onrender.com");
+
+      async function getMicrophoneStream() {
+        const selectedAudioOptions = {
+          echoCancellation: toggleAec.checked,
+          noiseSuppression: toggleNs.checked,
+          autoGainControl: toggleAgc.checked,
+        };
+
+        const strictAudioConstraints = {
+          echoCancellation: { ideal: selectedAudioOptions.echoCancellation },
+          noiseSuppression: { ideal: selectedAudioOptions.noiseSuppression },
+          autoGainControl: { ideal: selectedAudioOptions.autoGainControl },
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 48000 },
+          latency: { ideal: 0.01 },
+        };
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: strictAudioConstraints,
+          });
+          return stream;
+        } catch (err) {
+          console.warn("Fallback getUserMedia constraints:", err);
+          return navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: selectedAudioOptions.echoCancellation,
+              noiseSuppression: selectedAudioOptions.noiseSuppression,
+              autoGainControl: selectedAudioOptions.autoGainControl,
+              channelCount: 1,
+            },
+          });
+        }
+      }
 
       async function startCall(role) {
         try {
@@ -155,14 +231,8 @@
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
           });
 
-          // 1. Yêu cầu Micro (Tối ưu cho lọc nhiễu phần cứng trước khi qua AI)
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              channelCount: 1,
-            },
-          });
+          // 1. Yêu cầu micro với AEC/NS/AGC ở client để giảm echo từ thiết bị phát.
+          const stream = await getMicrophoneStream();
 
           console.log("Đã nhận stream micro.");
           stream.getTracks().forEach((track) => pc.addTrack(track, stream));

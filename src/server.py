@@ -67,9 +67,6 @@ DRY_SIGNAL_RATIO = 0.8
 AI_MIN_RMS_RATIO = 0.05
 # Làm mượt biên frame để giảm rè/xé tiếng tại ranh giới frame.
 CROSSFADE_MS = 5
-# Tạm tắt nhánh tham chiếu đối phương vì dễ tạo artifact khi estimate delay lệch.
-ENABLE_PARTNER_REFERENCE = False
-
 # === LOW LATENCY MODE (OPT-IN) ===
 # Mặc định tắt để giữ nguyên hành vi hiện tại đang ổn định.
 LOW_LATENCY_MODE = True
@@ -84,7 +81,7 @@ AGGRESSIVE_LOW_LATENCY = True
 
 # Buffer size sẽ tự điều chỉnh dựa trên chế độ:
 # - AGGRESSIVE: 4800 (100ms) để giảm trễ cực kỳ
-# - NORMAL: 48000 (1 giây) để giữ được lịch sử nếu dùng AEC
+# - NORMAL: 48000 (1 giây)
 if AGGRESSIVE_LOW_LATENCY:
     BUFFER_SIZE = 4800
     DF_ATTEN_LIM_DB = 1.0  # Giảm từ 4.0 để AI nhanh hơn
@@ -93,30 +90,12 @@ if AGGRESSIVE_LOW_LATENCY:
 else:
     BUFFER_SIZE = 48000
     # DF_ATTEN_LIM_DB/DRY_SIGNAL_RATIO/CROSSFADE_MS giữ nguyên giá trị đã define ở trên
-audio_history = {
-    'user1': np.zeros(BUFFER_SIZE, dtype=np.float32),
-    'user2': np.zeros(BUFFER_SIZE, dtype=np.float32)
-}
-
-def calculate_delay_gcc_phat(mic_sig, ref_sig):
-    n = mic_sig.shape[0] + ref_sig.shape[0]
-    SIG = np.fft.rfft(mic_sig, n=n)
-    REFSIG = np.fft.rfft(ref_sig, n=n)
-    R = SIG * np.conj(REFSIG)
-    cc = np.fft.irfft(R / (np.abs(R) + 1e-15), n=n)
-    max_shift = int(n / 2)
-    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
-    return np.argmax(np.abs(cc)) - max_shift
-
 class AIFilterTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, role_to_process):
         super().__init__()
         self.role_to_process = role_to_process
-        self.partner_role = 'user2' if role_to_process == 'user1' else 'user1'
-        self.frame_counter = 0
-        self.cached_shift = 0
         self._pts = 0
         self._logged_audio_meta = False
         self._logged_level_once = False
@@ -202,27 +181,19 @@ class AIFilterTrack(MediaStreamTrack):
             
         current_samples = data_to_store.shape[0]
 
-        # 3. Cập nhật lịch sử (Sửa lỗi Broadcast tại đây)
-        # Sử dụng slice động dựa trên chính kích thước của data_to_store
-        if current_samples >= BUFFER_SIZE:
-            audio_history[self.role_to_process] = data_to_store[-BUFFER_SIZE:]
-        else:
-            audio_history[self.role_to_process] = np.roll(audio_history[self.role_to_process], -current_samples)
-            audio_history[self.role_to_process][-current_samples:] = data_to_store
-
-        # 4. Chạy AI trong thread riêng
+        # 3. Chạy AI trong thread riêng
         # Đảm bảo tensor có hình dạng đúng (1, samples)
         my_tensor = torch.from_numpy(data_to_store).unsqueeze(0)
         if ENABLE_AI_PROCESSING:
             try:
-                clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor, current_samples)
+                clean_tensor = await asyncio.to_thread(self._process_audio, my_tensor)
             except Exception as e:
                 logger.exception(f"[{self.role_to_process}] AI processing lỗi, fallback passthrough: {e}")
                 clean_tensor = my_tensor
         else:
             clean_tensor = my_tensor
 
-        # 5. Trả về frame (Đảm bảo định dạng int16 mono)
+        # 4. Trả về frame (Đảm bảo định dạng int16 mono)
         clean_audio_float = clean_tensor.squeeze().detach().cpu().numpy().astype(np.float32)
         if clean_audio_float.shape[0] != current_samples:
             logger.warning(
@@ -265,30 +236,11 @@ class AIFilterTrack(MediaStreamTrack):
         new_frame.time_base = frame.time_base
         return new_frame
     
-    def _process_audio(self, my_tensor, current_samples):
+    def _process_audio(self, my_tensor):
         # Nếu ENABLE_AI_PROCESSING = False, chỉ pass-through không xử lý để test latency.
         if not ENABLE_AI_PROCESSING:
             return my_tensor
-        
-        self.frame_counter += 1
-        partner_track = room_tracks.get(self.partner_role)
-        
-        if partner_track and ENABLE_PARTNER_REFERENCE:
-            partner_hist = audio_history[self.partner_role]
-            # Kiểm tra nếu đối phương đang nói (AEC)
-            if np.max(np.abs(partner_hist[-4800:])) > 0.01:
-                if self.frame_counter % 20 == 0: # Cập nhật độ trễ thường xuyên hơn
-                    self.cached_shift = calculate_delay_gcc_phat(audio_history[self.role_to_process][-8000:], partner_hist[-8000:])
-                
-                start_idx = BUFFER_SIZE - current_samples + self.cached_shift
-                if 0 <= start_idx <= BUFFER_SIZE - current_samples:
-                    ref_audio = partner_hist[start_idx : start_idx + current_samples]
-                    # DeepFilterNet enhance() bản hiện tại không hỗ trợ attn_state.
-                    # Giữ nhánh AEC để có thể mở rộng sau, nhưng fallback sang enhance chuẩn.
-                    _ = ref_audio
-                    atten_db = 1.0 if AGGRESSIVE_LOW_LATENCY else DF_ATTEN_LIM_DB
-                    return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=atten_db)
-        
+
         atten_db = 1.0 if AGGRESSIVE_LOW_LATENCY else DF_ATTEN_LIM_DB
         return enhance(df_model, self.df_state, my_tensor, pad=False, atten_lim_db=atten_db)
 
