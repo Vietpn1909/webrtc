@@ -1,7 +1,2 @@
 aiohttp==3.9.5
 aiohttp-cors==0.7.0
-aiortc==1.6.0
-av==10.0.0
-numpy
-torch
-deepfilternet
