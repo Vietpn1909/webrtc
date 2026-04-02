@@ -197,15 +197,17 @@
 
       <div id="status">Sẵn sàng kết nối...</div>
 
-      <!-- Đồ thị trực quan âm thanh -->
       <div class="canvas-container">
-        <!-- Đã ẩn Đồ thị Micro (vizLocal) để không dính lỗi Chrome WebAudio Bypass AEC -->
-        <div class="visualizer-wrapper" id="vizLocalWrapper">
-          <div class="visualizer-title">🔴 Micro của bạn</div>
-          <canvas id="vizLocal"></canvas>
+        <div class="visualizer-wrapper" id="vizRawWrapper">
+          <div class="visualizer-title">🔴 Âm thanh dội vào Micro (Bị dính vọng)</div>
+          <canvas id="vizRaw"></canvas>
+        </div>
+        <div class="visualizer-wrapper" id="vizProcessedWrapper">
+          <div class="visualizer-title">🟠 Âm thanh AI Góp Nhặt (Sạch bong gởi đi WebRTC)</div>
+          <canvas id="vizProcessed"></canvas>
         </div>
         <div class="visualizer-wrapper">
-          <div class="visualizer-title">🟢 Loa phát ra (Nhận về)</div>
+          <div class="visualizer-title">🟢 Loa phát ra lúc này</div>
           <canvas id="vizRemote"></canvas>
         </div>
       </div>
@@ -251,7 +253,9 @@
         return { canvas, ctx, color: colorStr, width: rect.width, height: rect.height };
       }
 
-      const vizRemote = initVisualizer('vizRemote', '#10b981'); // Xanh cho loa
+      const vizRaw = initVisualizer('vizRaw', '#f43f5e'); // Đỏ
+      const vizProcessed = initVisualizer('vizProcessed', '#f97316'); // Cam
+      const vizRemote = initVisualizer('vizRemote', '#10b981'); // Xanh
 
       function setupAudioContext() {
         if (!audioCtx) {
@@ -267,10 +271,10 @@
         source.connect(analyser); // Chỉ trích xuất số liệu, không đẩy ra WebRTC
         
         remoteAnalyser = analyser;
-        drawWaveform(vizRemote, remoteAnalyser);
+        drawWaveform(vizRemote, remoteAnalyser, () => true);
       }
 
-      function drawWaveform(vizObj, analyserNode) {
+      function drawWaveform(vizObj, analyserNode, enabledCheckFn) {
         const { ctx, width, height, color } = vizObj;
         const bufferLength = analyserNode.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
@@ -287,10 +291,13 @@
 
           const sliceWidth = width * 1.0 / bufferLength;
           let x = 0;
+          
+          const isEnabled = enabledCheckFn();
 
           for(let i = 0; i < bufferLength; i++) {
             const v = dataArray[i] / 128.0; 
-            const y = v * height / 2;
+            const y = isEnabled ? (v * height / 2) : (height / 2); // Kéo phẳng băng nếu bị Mute
+            
             if(i === 0) {
               ctx.moveTo(x, y);
             } else {
@@ -312,13 +319,23 @@
         vadBadgeEl.innerText = "⏳ Đang tải AI...";
         
         // CỰC KỲ QUAN TRỌNG: Clone track TRƯỚC KHI disable track chính!
-        // Như vậy track clone dành cho AI vẫn mở (enabled = true) và nghe được tiếng.
         const clonedTrack = myAudioTrack.clone();
         clonedTrack.enabled = true; 
         const cloneStream = new MediaStream([clonedTrack]);
         
         // Mặc định khóa đường truyền WebRTC chính
         myAudioTrack.enabled = false;
+        
+        // Hiển thị đồ thị Micro ngay lúc này từ luồng Clone (Hoàn toàn An Toàn)
+        setupAudioContext();
+        const micSource = audioCtx.createMediaStreamSource(cloneStream);
+        const micAnalyser = audioCtx.createAnalyser();
+        micAnalyser.fftSize = 2048;
+        micSource.connect(micAnalyser);
+        
+        // Vẽ 2 đồ thị song song để so sánh trực quan
+        drawWaveform(vizRaw, micAnalyser, () => true); // Biểu đồ thô (Luôn vẽ sóng)
+        drawWaveform(vizProcessed, micAnalyser, () => myAudioTrack.enabled); // Biểu đồ AI (Vẽ thẳng đuột nếu Mute)
         
         try {
           const myvad = await vad.MicVAD.new({
