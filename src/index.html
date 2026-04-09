@@ -233,6 +233,12 @@
       
       let myRawStream = null;
       let myAudioTrack = null;
+      let speechStartTimer = null;
+      let speechEndTimer = null;
+      let speechIsOpen = false;
+
+      const VAD_START_CONFIRM_MS = 180;
+      const VAD_END_HOLD_MS = 320;
 
       const WS_URL = window.__env?.BACKEND_URL || 
              (window.location.protocol === "https:" ? "wss://" : "ws://") + 
@@ -314,6 +320,15 @@
       // ---- Tích hợp Silero VAD (Theo phương pháp Track.enabled) ----
       async function setupVADToggle(rawStream) {
         myAudioTrack = rawStream.getAudioTracks()[0];
+        speechIsOpen = false;
+        if (speechStartTimer) {
+          clearTimeout(speechStartTimer);
+          speechStartTimer = null;
+        }
+        if (speechEndTimer) {
+          clearTimeout(speechEndTimer);
+          speechEndTimer = null;
+        }
         
         vadBadgeEl.style.display = 'inline-block';
         vadBadgeEl.innerText = "⏳ Đang tải AI...";
@@ -341,18 +356,55 @@
           const myvad = await vad.MicVAD.new({
             stream: cloneStream, 
             onSpeechStart: () => {
-              // Mở khóa Track chính -> Phát âm lập tức
-              myAudioTrack.enabled = true;
-              vadBadgeEl.innerText = "🎤 KHÁCH NÓI: GIỌNG THỰC (MỞ)";
-              vadBadgeEl.className = "vad-status gate-open";
+              if (speechEndTimer) {
+                clearTimeout(speechEndTimer);
+                speechEndTimer = null;
+              }
+
+              if (speechIsOpen || speechStartTimer) {
+                return;
+              }
+
+              speechStartTimer = setTimeout(() => {
+                speechStartTimer = null;
+                speechIsOpen = true;
+                myAudioTrack.enabled = true;
+                vadBadgeEl.innerText = "🎤 KHÁCH NÓI: GIỌNG THỰC (MỞ)";
+                vadBadgeEl.className = "vad-status gate-open";
+              }, VAD_START_CONFIRM_MS);
             },
             onSpeechEnd: () => {
-              // Khóa Track chính
-              setTimeout(() => { myAudioTrack.enabled = false; }, 100);
-              vadBadgeEl.innerText = "🤫 AI MUTE: ĐÃ CHẶN TIẾNG VỌNG";
-              vadBadgeEl.className = "vad-status gate-closed";
+              if (speechStartTimer) {
+                clearTimeout(speechStartTimer);
+                speechStartTimer = null;
+              }
+
+              if (!speechIsOpen) {
+                return;
+              }
+
+              if (speechEndTimer) {
+                clearTimeout(speechEndTimer);
+              }
+
+              speechEndTimer = setTimeout(() => {
+                speechEndTimer = null;
+                speechIsOpen = false;
+                myAudioTrack.enabled = false;
+                vadBadgeEl.innerText = "🤫 AI MUTE: ĐÃ CHẶN TIẾNG VỌNG";
+                vadBadgeEl.className = "vad-status gate-closed";
+              }, VAD_END_HOLD_MS);
             },
             onVADMisfire: () => {
+              if (speechStartTimer) {
+                clearTimeout(speechStartTimer);
+                speechStartTimer = null;
+              }
+              if (speechEndTimer) {
+                clearTimeout(speechEndTimer);
+                speechEndTimer = null;
+              }
+              speechIsOpen = false;
               myAudioTrack.enabled = false;
               vadBadgeEl.innerText = "🤫 AI MUTE: ĐÃ CHẶN TẠP ÂM/VỌNG";
               vadBadgeEl.className = "vad-status gate-closed";
@@ -374,7 +426,7 @@
 
         const constraints = {
           audio: {
-            echoCancellation: true, // Ép Chrome bật AEC Phần Cứng (True flag)
+            echoCancellation: toggleAec.checked, // Bật AEC của trình duyệt để giảm vọng
             noiseSuppression: true,
             autoGainControl: true,
             channelCount: 1,
