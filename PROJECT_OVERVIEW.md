@@ -1,15 +1,20 @@
-# WebRTC AI Audio Hub - Tai lieu du an
+# WebRTC Audio Hub - Tai lieu du an
 
 ## 1) Tong quan
 
-Du an la mot ung dung **dam thoai 2 nguoi theo thoi gian thuc** dung WebRTC, trong do:
-- **Client** xu ly echo cancellation/noise suppression/auto gain control ngay tren thiet bi micro.
-- **Backend Python** xu ly khu nhieu bang **DeepFilterNet**, sau do tra audio da xu ly ve cho ben con lai.
+Du an la mot ung dung **dam thoai 2 nguoi theo thoi gian thuc** dung WebRTC. Hien tai, he thong duoc toi uu theo huong:
+- **Client** xu ly audio ngay tren trinh duyet, gom echo cancellation, noise suppression, auto gain control va VAD gating.
+- **Backend Python** chi dong vai tro **signaling server**: trao doi offer/answer/candidate va dong bo trang thai ket noi giua 2 user.
+
+Ly do chuyen xu ly sang client:
+- Giam latency ro ret so voi viec dua audio ve server roi xu ly.
+- WebRTC co san cac co che xu ly micro tren trinh duyet.
+- Giu duong audio theo kieu P2P, backend khong nam tren duong truyen am thanh.
 
 Muc tieu chinh:
 - Tao kenh lien lac audio 2 chieu.
-- Giam nhieu/am vang tren luong am thanh.
-- Uu tien do tre thap cho call realtime.
+- Giam delay toi da cho call realtime.
+- Giu backend don gian, chi phuc vu signaling va ket noi.
 
 ## 2) Cau truc thu muc
 
@@ -18,44 +23,41 @@ webrtc/
 |- README.md
 |- requirements.txt
 `- src/
-   |- server.py      # Backend signaling + xu ly audio AI
-   `- index.html     # Frontend WebRTC 2 nut User1/User2
+  |- server.py      # Backend signaling
+  `- index.html     # Frontend WebRTC 2 nut User1/User2
 ```
 
 ## 3) Cong nghe su dung
 
-- **Backend**: `aiohttp`, `aiortc`, `aiohttp-cors`
-- **Audio/AI**: `numpy`, `torch`, `deepfilternet`, `av`
+- **Backend**: `aiohttp`, `aiohttp-cors`
 - **Frontend**: HTML + JavaScript thuần (khong framework)
-- **Protocol**: WebRTC (SDP offer/answer + ICE/STUN)
+- **Audio tren client**: `getUserMedia`, Web Audio API, VAD trong browser
+- **Protocol**: WebRTC (SDP offer/answer + ICE/STUN) + WebSocket signaling
 
 ## 4) Luong hoat dong
 
 1. Nguoi dung mo trinh duyet, bam `Toi la Nguoi 1` hoac `Toi la Nguoi 2`.
 2. Frontend lay micro (`getUserMedia`) voi AEC/NS/AGC va tao `RTCPeerConnection`.
-3. Frontend gui SDP offer den backend qua `POST /offer`.
-4. Backend tao peer connection, nhan audio track vao.
-5. Backend dua audio vao `AIFilterTrack` de:
-   - chuan hoa audio,
-   - downmix mono,
-   - xu ly DeepFilterNet (co fallback passthrough),
-   - crossfade/chong clip truoc khi tra ve.
-6. Backend tra SDP answer, frontend set remote description va phat audio nhan duoc.
+3. Frontend ket noi toi backend qua WebSocket `/ws` de xin join vao vai tro dang chon.
+4. Backend luu trang thai 2 user, khi ca 2 ben da san sang se gui tin hieu `peer_ready`.
+5. User 1 tao SDP offer, gui qua backend sang user 2; user 2 tao SDP answer va tra lai.
+6. ICE candidate tiep tuc duoc chuyen qua backend de WebRTC hoi tu.
+7. Khi ket noi xong, audio di truc tiep P2P giua 2 trinh duyet.
+8. Client su dung VAD de bat/tat track micro, giup giam am vong va tap am khi khong co tieng noi.
 
 ## 5) Cac file quan trong
 
 - `src/server.py`
-  - Khoi tao model DeepFilterNet.
-  - Xu ly signaling endpoint: `GET /`, `POST /offer`.
-  - Quan ly peer connections va stream theo 2 vai tro `user1`, `user2`.
-  - Co cac bien tuning latency/chat luong nhu `LOW_LATENCY_MODE`, `AGGRESSIVE_LOW_LATENCY`, `DRY_SIGNAL_RATIO`.
-  - Khong thuc hien echo cancellation tham chieu doi phuong o server.
+  - Chay backend signaling bang `aiohttp`.
+  - Quan ly ket noi WebSocket cho 2 vai tro `user1`, `user2`.
+  - Chuyen tiep `join`, `offer`, `answer`, `candidate` giua 2 ben.
+  - Khong xu ly audio, khong nam trong duong truyen am thanh.
 
 - `src/index.html`
   - Giao dien don gian 2 nut role.
-  - Co toggle UI bat/tat `Echo Cancellation`, `Noise Suppression`, `Auto Gain Control`.
-  - Tao WebRTC offer/answer voi backend.
-  - Thu micro voi constraints uu tien echo cancellation/noise suppression/auto gain control o client.
+  - Lay micro va bat cac tro ly audio cua trinh duyet.
+  - Tao WebRTC offer/answer voi backend qua WebSocket.
+  - Chay VAD de gate track micro, dam bao call realtime it vang va it latency.
   - Tu dong chon `BACKEND_URL` theo local/production.
 
 ## 6) Yeu cau moi truong
@@ -137,7 +139,8 @@ Neu co `cert.pem` va `key.pem` trong `src/`, backend se bat SSL tu dong.
   - Kiem tra log backend xem co loi khi nhan `track` khong.
 
 - **Do tre cao**
-  - Kiem tra cac bien latency trong `src/server.py` (`AGGRESSIVE_LOW_LATENCY`, `LOW_LATENCY_MODE`).
+  - Kiem tra network, firewall va trang thai WebRTC/ICE.
+  - Dam bao audio xu ly o client dang duoc bat dung cach.
   - Tat cac ung dung nang CPU/GPU khi test.
 
 - **Loi CORS khi tach frontend/backend**
@@ -147,7 +150,7 @@ Neu co `cert.pem` va `key.pem` trong `src/`, backend se bat SSL tu dong.
 ## 11) Ghi chu nhanh cho dev moi
 
 - Diem vao chinh de hieu he thong:
-  1. `src/index.html` (offer/answer o frontend)
-  2. `src/server.py` ham `offer()` (signaling backend)
-  3. `AIFilterTrack.recv()` (pipeline xu ly audio)
-- Neu can benchmark latency, co the tat xu ly AI bang `ENABLE_AI_PROCESSING = False` de so sanh.
+  1. `src/index.html` (xin micro, VAD, offer/answer, phat audio)
+  2. `src/server.py` (signaling backend)
+  3. Luong audio thuc te chay trong browser, khong di qua server.
+- Neu can benchmark latency, hay so sanh giua bat/tat VAD va cac thuoc tinh audio cua trinh duyet.
