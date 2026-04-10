@@ -3,16 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>P2P Audio Hub - Native AEC + AI VAD Hacks</title>
-    
-    <!-- AI VAD Libs -->
+    <title>P2P Audio Hub — 3-Layer AEC</title>
+
+    <!-- Layer 3: Silero VAD (ONNX Runtime) — loaded upfront -->
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.19/dist/bundle.min.js"></script>
-    
-    <link
-      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Layer 2: Spectral Denoise worklet (inline blob, no CDN needed) -->
+
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet" />
     <style>
       :root {
         --primary: #00d2ff;
@@ -36,83 +34,32 @@
       .container {
         background: rgba(30, 41, 59, 0.7);
         backdrop-filter: blur(10px);
-        padding: 3rem;
+        padding: 2.5rem;
         border-radius: 24px;
         box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
         text-align: center;
         border: 1px solid rgba(255, 255, 255, 0.1);
-        max-width: 600px;
+        max-width: 640px;
         width: 90%;
-        margin-top: 2rem;
-        margin-bottom: 2rem;
+        margin: 2rem auto;
       }
       h1 {
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.25rem;
         font-weight: 600;
         background: linear-gradient(to right, #00d2ff, #3a7bd5);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
       }
-      p {
-        color: #94a3b8;
-        margin-bottom: 1rem;
-      }
+      .subtitle { color: #94a3b8; margin-bottom: 1.25rem; font-size: 14px; }
       .btn-group {
         display: flex;
         gap: 1rem;
         justify-content: center;
-        margin-bottom: 1.5rem;
-      }
-      
-      .vad-status {
-        display: inline-block;
-        padding: 5px 15px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 14px;
-        margin-bottom: 1.5rem;
-        transition: all 0.2s;
-        border: 2px solid transparent;
-      }
-      .gate-closed {
-        background: rgba(244, 63, 94, 0.2);
-        color: #f43f5e;
-        border-color: #f43f5e;
-      }
-      .gate-open {
-        background: rgba(16, 185, 129, 0.2);
-        color: #10b981;
-        border-color: #10b981;
-        box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
-      }
-
-      .toggle-group {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 0.6rem;
-        margin: 0 auto 1.5rem;
-        max-width: 320px;
-        text-align: left;
-      }
-      .toggle-item {
-        display: flex;
-        align-items: center;
-        gap: 0.6rem;
-        padding: 0.5rem 0.7rem;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.05);
-      }
-      .toggle-item input {
-        transform: scale(1.1);
-      }
-      .toggle-item label {
-        color: #cbd5e1;
-        font-size: 14px;
-        user-select: none;
+        margin-bottom: 1.25rem;
       }
       button {
-        padding: 12px 24px;
-        font-size: 16px;
+        padding: 10px 22px;
+        font-size: 15px;
         font-weight: 600;
         cursor: pointer;
         background: linear-gradient(to right, #00d2ff, #3a7bd5);
@@ -122,14 +69,57 @@
         transition: all 0.3s ease;
         box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3);
       }
-      button:hover {
-        transform: translateY(-2px);
+      button:hover { transform: translateY(-2px); }
+      button:disabled { background: #475569; cursor: not-allowed; box-shadow: none; transform: none; }
+
+      /* Layer panel */
+      .layer-panel {
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1rem;
+        text-align: left;
       }
-      button:disabled {
-        background: #475569;
-        cursor: not-allowed;
-        box-shadow: none;
+      .layer-panel h3 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: #64748b;
+        margin: 0 0 0.5rem;
       }
+      .toggle-item {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.3rem 0;
+      }
+      .toggle-item input { transform: scale(1.1); flex-shrink: 0; }
+      .toggle-item label { color: #cbd5e1; font-size: 13px; user-select: none; flex: 1; }
+      .layer-badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .badge-ok      { background: rgba(16,185,129,.2);  color: #10b981; border: 1px solid #10b981; }
+      .badge-warn    { background: rgba(245,158,11,.2);  color: #f59e0b; border: 1px solid #f59e0b; }
+      .badge-skip    { background: rgba(100,116,139,.2); color: #64748b; border: 1px solid #64748b; }
+      .badge-loading { background: rgba(59,130,246,.2);  color: #3b82f6; border: 1px solid #3b82f6; }
+
+      .vad-status {
+        display: inline-block;
+        padding: 5px 15px;
+        border-radius: 20px;
+        font-weight: bold;
+        font-size: 14px;
+        margin-bottom: 1rem;
+        transition: all 0.2s;
+        border: 2px solid transparent;
+      }
+      .gate-closed { background: rgba(244,63,94,.2);  color: #f43f5e; border-color: #f43f5e; }
+      .gate-open   { background: rgba(16,185,129,.2); color: #10b981; border-color: #10b981;
+                     box-shadow: 0 0 10px rgba(16,185,129,.5); }
 
       #status {
         margin-top: 10px;
@@ -139,434 +129,635 @@
         background: rgba(0, 0, 0, 0.2);
         color: #38bdf8;
       }
-      .error {
-        color: #f87171 !important;
-        background: rgba(248, 113, 113, 0.1) !important;
-      }
+      .error { color: #f87171 !important; background: rgba(248,113,113,.1) !important; }
 
-      .canvas-container {
-        margin-top: 1.5rem;
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-      }
+      .canvas-container { margin-top: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; }
       .visualizer-wrapper {
-        background: rgba(0,0,0,0.3);
+        background: rgba(0,0,0,.3);
         border-radius: 12px;
-        padding: 10px;
-        border: 1px solid rgba(255,255,255,0.1);
+        padding: 8px 10px;
+        border: 1px solid rgba(255,255,255,.07);
       }
       .visualizer-title {
-        font-size: 12px;
-        color: #cbd5e1;
-        margin-bottom: 5px;
+        font-size: 11px;
+        color: #94a3b8;
+        margin-bottom: 4px;
         text-align: left;
         text-transform: uppercase;
         letter-spacing: 1px;
       }
-      canvas {
-        width: 100%;
-        height: 80px;
-        background: #000;
-        border-radius: 8px;
-      }
-
-      #vizLocalWrapper {
-        display: none; /* Ẩn đi để ĐẢM BẢO CHẮC CHẮN không cướp tín hiệu phần cứng! */
-      }
+      canvas { width: 100%; height: 60px; background: #000; border-radius: 6px; }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>AI Echo Gate (Track Hack)</h1>
-      <p>Cơ chế P2P độ trễ 0 kết hợp VAD đánh lừa thiết bị</p>
+      <h1>3-Layer AEC Demo</h1>
+      <p class="subtitle">Native AEC &rarr; Spectral Denoise &rarr; VAD Gate &nbsp;|&nbsp; P2P Audio</p>
 
       <div class="btn-group">
-        <button id="btnUser1">Tôi là Người 1 (Gọi lệnh)</button>
-        <button id="btnUser2">Tôi là Người 2 (Chờ nhận)</button>
+        <button id="btnUser1">Người 1 (Gọi)</button>
+        <button id="btnUser2">Người 2 (Nhận)</button>
       </div>
 
-      <div id="vadBadge" class="vad-status gate-closed" style="display:none;">AI VAD Đang Chờ...</div>
-
-      <div class="toggle-group" id="filterOptions">
+      <!-- Layer configuration -->
+      <div class="layer-panel">
+        <h3>Cấu hình lớp xử lý</h3>
         <div class="toggle-item">
           <input type="checkbox" id="toggleAec" checked />
-          <label for="toggleAec">Trình duyệt Native Echo Cancellation</label>
+          <label for="toggleAec">Layer 1 — Browser Native AEC (AEC3)</label>
+          <span id="badgeL1" class="layer-badge badge-ok">Browser</span>
+        </div>
+        <div class="toggle-item">
+          <input type="checkbox" id="toggleRnnoise" checked />
+          <label for="toggleRnnoise">Layer 2 — Spectral Denoise (STFT)</label>
+          <span id="badgeL2" class="layer-badge badge-skip">Chưa tải</span>
+        </div>
+        <div class="toggle-item">
+          <input type="checkbox" id="toggleVad" checked />
+          <label for="toggleVad">Layer 3 — VAD Gate (Silero / RMS)</label>
+          <span id="badgeL3" class="layer-badge badge-skip">Chưa tải</span>
         </div>
       </div>
 
+      <div id="vadBadge" class="vad-status gate-closed" style="display:none;">VAD Standby</div>
       <div id="status">Sẵn sàng kết nối...</div>
 
       <div class="canvas-container">
-        <div class="visualizer-wrapper" id="vizRawWrapper">
-          <div class="visualizer-title">🔴 Âm thanh dội vào Micro (Bị dính vọng)</div>
+        <div class="visualizer-wrapper">
+          <div class="visualizer-title">🔴 L1 Output — Raw mic sau Native AEC</div>
           <canvas id="vizRaw"></canvas>
         </div>
-        <div class="visualizer-wrapper" id="vizProcessedWrapper">
-          <div class="visualizer-title">🟠 Âm thanh AI Góp Nhặt (Sạch bong gởi đi WebRTC)</div>
-          <canvas id="vizProcessed"></canvas>
+        <div class="visualizer-wrapper">
+          <div class="visualizer-title">🟡 L2 Output — Sau Spectral Denoise (tín hiệu gửi đi WebRTC)</div>
+          <canvas id="vizL2"></canvas>
         </div>
         <div class="visualizer-wrapper">
-          <div class="visualizer-title">🟢 Loa phát ra lúc này</div>
+          <div class="visualizer-title">🟢 Remote — Âm thanh nhận được từ đối tác</div>
           <canvas id="vizRemote"></canvas>
         </div>
       </div>
     </div>
 
-    <!-- Phát âm thanh từ người kia đối diện -->
     <audio id="audioOutput" autoplay playsinline></audio>
 
     <script>
-      const audioEl = document.getElementById("audioOutput");
-      const statusEl = document.getElementById("status");
-      const vadBadgeEl = document.getElementById("vadBadge");
-      const btns = [
-        document.getElementById("btnUser1"),
-        document.getElementById("btnUser2"),
-      ];
-      
-      const toggleAec = document.getElementById("toggleAec");
-      
-      let pc = null;
-      let ws = null;
-      let myRole = null;
-      
-      let myRawStream = null;
-      let myAudioTrack = null;
-      let speechStartTimer = null;
-      let speechEndTimer = null;
-      let speechIsOpen = false;
+      // ===================== CONSTANTS =====================
+      const VAD_START_MS  = 180;
+      const VAD_END_MS    = 320;
+      const RMS_THRESHOLD = 0.012;
+      const WS_URL = window.__env?.BACKEND_URL ||
+        (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 
-      const VAD_START_CONFIRM_MS = 180;
-      const VAD_END_HOLD_MS = 320;
-
-      const WS_URL = window.__env?.BACKEND_URL || 
-             (window.location.protocol === "https:" ? "wss://" : "ws://") + 
-             window.location.host + "/ws";
-
-      // ------------- WEB AUDIO API CHỈ CHO LOA MÁY ĐỐI DIỆN -------------
+      // ===================== STATE =====================
+      let pc = null, ws = null, myRole = null;
       let audioCtx = null;
-      let remoteAnalyser = null;
+      let myAudioTrack = null;         // track trên processedStream bị gate bởi VAD
+      let speechIsOpen = false;
+      let speechStartTimer = null, speechEndTimer = null;
 
-      function initVisualizer(canvasId, colorStr) {
-        const canvas = document.getElementById(canvasId);
-        const ctx = canvas.getContext('2d');
-        const dpr = window.devicePixelRatio || 1;
-        const rect = canvas.getBoundingClientRect();
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
-        ctx.scale(dpr, dpr);
-        return { canvas, ctx, color: colorStr, width: rect.width, height: rect.height };
+      // ===================== DOM =====================
+      const audioEl    = document.getElementById('audioOutput');
+      const statusEl   = document.getElementById('status');
+      const vadBadgeEl = document.getElementById('vadBadge');
+      const btns       = [document.getElementById('btnUser1'), document.getElementById('btnUser2')];
+      const badgeL1    = document.getElementById('badgeL1');
+      const badgeL2    = document.getElementById('badgeL2');
+      const badgeL3    = document.getElementById('badgeL3');
+
+      // ===================== UTILS =====================
+      /**
+       * iOS luôn dùng RMS VAD vì AudioWorklet và ONNX Runtime có vấn đề với AVAudioSession.
+       * Thiết bị <= 2 core cũng fallback để tiết kiệm CPU.
+       */
+      function isLowEndDevice() {
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        const veryLowCores = (navigator.hardwareConcurrency || 2) <= 2;
+        return isIOS || veryLowCores;
       }
-
-      const vizRaw = initVisualizer('vizRaw', '#f43f5e'); // Đỏ
-      const vizProcessed = initVisualizer('vizProcessed', '#f97316'); // Cam
-      const vizRemote = initVisualizer('vizRemote', '#10b981'); // Xanh
 
       function setupAudioContext() {
-        if (!audioCtx) {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
       }
 
-      function attachStreamToVisualizer(stream) {
-        setupAudioContext();
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        source.connect(analyser); // Chỉ trích xuất số liệu, không đẩy ra WebRTC
-        
-        remoteAnalyser = analyser;
-        drawWaveform(vizRemote, remoteAnalyser, () => true);
+      function initCanvas(id) {
+        const canvas = document.getElementById(id);
+        const ctx    = canvas.getContext('2d');
+        const dpr    = window.devicePixelRatio || 1;
+        const rect   = canvas.getBoundingClientRect();
+        canvas.width  = rect.width  * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+        return { ctx, color: '#fff', w: rect.width, h: rect.height };
       }
 
-      function drawWaveform(vizObj, analyserNode, enabledCheckFn) {
-        const { ctx, width, height, color } = vizObj;
-        const bufferLength = analyserNode.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-
-        function draw() {
+      function drawWaveform(viz, analyser, enabledFn) {
+        const { ctx, w, h, color } = viz;
+        const buf     = new Uint8Array(analyser.frequencyBinCount);
+        const sliceW  = w / buf.length;
+        (function draw() {
           requestAnimationFrame(draw);
-          analyserNode.getByteTimeDomainData(dataArray);
-
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(0, 0, width, height);
-          ctx.lineWidth = 2;
+          analyser.getByteTimeDomainData(buf);
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, w, h);
           ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
           ctx.beginPath();
-
-          const sliceWidth = width * 1.0 / bufferLength;
+          const active = enabledFn();
           let x = 0;
-          
-          const isEnabled = enabledCheckFn();
-
-          for(let i = 0; i < bufferLength; i++) {
-            const v = dataArray[i] / 128.0; 
-            const y = isEnabled ? (v * height / 2) : (height / 2); // Kéo phẳng băng nếu bị Mute
-            
-            if(i === 0) {
-              ctx.moveTo(x, y);
-            } else {
-              ctx.lineTo(x, y);
-            }
-            x += sliceWidth;
+          for (let i = 0; i < buf.length; i++) {
+            const y = active ? (buf[i] / 128 * h / 2) : (h / 2);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            x += sliceW;
           }
-          ctx.lineTo(width, height / 2);
+          ctx.lineTo(w, h / 2);
           ctx.stroke();
-        }
-        draw(); 
+        })();
       }
 
-      // ---- Tích hợp Silero VAD (Theo phương pháp Track.enabled) ----
-      async function setupVADToggle(rawStream) {
-        myAudioTrack = rawStream.getAudioTracks()[0];
-        speechIsOpen = false;
-        if (speechStartTimer) {
-          clearTimeout(speechStartTimer);
-          speechStartTimer = null;
-        }
-        if (speechEndTimer) {
-          clearTimeout(speechEndTimer);
-          speechEndTimer = null;
-        }
-        
-        vadBadgeEl.style.display = 'inline-block';
-        vadBadgeEl.innerText = "⏳ Đang tải AI...";
-        
-        // CỰC KỲ QUAN TRỌNG: Clone track TRƯỚC KHI disable track chính!
-        const clonedTrack = myAudioTrack.clone();
-        clonedTrack.enabled = true; 
-        const cloneStream = new MediaStream([clonedTrack]);
-        
-        // Mặc định khóa đường truyền WebRTC chính
-        myAudioTrack.enabled = false;
-        
-        // Hiển thị đồ thị Micro ngay lúc này từ luồng Clone (Hoàn toàn An Toàn)
-        setupAudioContext();
-        const micSource = audioCtx.createMediaStreamSource(cloneStream);
-        const micAnalyser = audioCtx.createAnalyser();
-        micAnalyser.fftSize = 2048;
-        micSource.connect(micAnalyser);
-        
-        // Vẽ 2 đồ thị song song để so sánh trực quan
-        drawWaveform(vizRaw, micAnalyser, () => true); // Biểu đồ thô (Luôn vẽ sóng)
-        drawWaveform(vizProcessed, micAnalyser, () => myAudioTrack.enabled); // Biểu đồ AI (Vẽ thẳng đuột nếu Mute)
-        
-        try {
-          const myvad = await vad.MicVAD.new({
-            stream: cloneStream, 
-            onSpeechStart: () => {
-              if (speechEndTimer) {
-                clearTimeout(speechEndTimer);
-                speechEndTimer = null;
-              }
+      const vizRaw    = { ...initCanvas('vizRaw'),    color: '#f43f5e' };
+      const vizL2     = { ...initCanvas('vizL2'),     color: '#f59e0b' };
+      const vizRemote = { ...initCanvas('vizRemote'), color: '#10b981' };
 
-              if (speechIsOpen || speechStartTimer) {
-                return;
-              }
-
-              speechStartTimer = setTimeout(() => {
-                speechStartTimer = null;
-                speechIsOpen = true;
-                myAudioTrack.enabled = true;
-                vadBadgeEl.innerText = "🎤 KHÁCH NÓI: GIỌNG THỰC (MỞ)";
-                vadBadgeEl.className = "vad-status gate-open";
-              }, VAD_START_CONFIRM_MS);
-            },
-            onSpeechEnd: () => {
-              if (speechStartTimer) {
-                clearTimeout(speechStartTimer);
-                speechStartTimer = null;
-              }
-
-              if (!speechIsOpen) {
-                return;
-              }
-
-              if (speechEndTimer) {
-                clearTimeout(speechEndTimer);
-              }
-
-              speechEndTimer = setTimeout(() => {
-                speechEndTimer = null;
-                speechIsOpen = false;
-                myAudioTrack.enabled = false;
-                vadBadgeEl.innerText = "🤫 AI MUTE: ĐÃ CHẶN TIẾNG VỌNG";
-                vadBadgeEl.className = "vad-status gate-closed";
-              }, VAD_END_HOLD_MS);
-            },
-            onVADMisfire: () => {
-              if (speechStartTimer) {
-                clearTimeout(speechStartTimer);
-                speechStartTimer = null;
-              }
-              if (speechEndTimer) {
-                clearTimeout(speechEndTimer);
-                speechEndTimer = null;
-              }
-              speechIsOpen = false;
-              myAudioTrack.enabled = false;
-              vadBadgeEl.innerText = "🤫 AI MUTE: ĐÃ CHẶN TẠP ÂM/VỌNG";
-              vadBadgeEl.className = "vad-status gate-closed";
-            }
-          });
-          myvad.start();
-          vadBadgeEl.innerText = "🤫 AI MUTE: SẴN SÀNG LẮNG NGHE";
-          
-        } catch (e) {
-          console.error("Lỗi kịch bản VAD:", e);
-          vadBadgeEl.innerText = "⚠️ Lỗi tải AI. Bật cờ thủ công.";
-          myAudioTrack.enabled = true; // Lỗi hỏng AI thì mở khóa luôn
-        }
+      function makeAnalyser(sourceNode) {
+        const an = audioCtx.createAnalyser();
+        an.fftSize = 2048;
+        sourceNode.connect(an);
+        return an;
       }
 
-      async function getMicrophoneStream() {
-        document.getElementById('filterOptions').style.opacity = '0.5';
-        document.getElementById('filterOptions').style.pointerEvents = 'none';
-
-        const constraints = {
+      // ===================== LAYER 1: NATIVE AEC =====================
+      async function getLayer1Stream() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error(
+            'Trình duyệt không hỗ trợ getUserMedia. ' +
+            'Hãy mở trang qua HTTPS hoặc localhost (http://127.0.0.1 / http://localhost).'
+          );
+        }
+        const useAEC = document.getElementById('toggleAec').checked;
+        const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
-            echoCancellation: toggleAec.checked, // Bật AEC của trình duyệt để giảm vọng
+            echoCancellation: useAEC,
             noiseSuppression: true,
             autoGainControl: true,
             channelCount: 1,
             sampleRate: 48000
           }
-        };
+        });
+
+        // Visualise raw mic (L1 output)
+        const src = audioCtx.createMediaStreamSource(stream);
+        drawWaveform(vizRaw, makeAnalyser(src), () => true);
+
+        badgeL1.textContent = useAEC ? 'AEC3 ON' : 'AEC3 OFF';
+        badgeL1.className   = useAEC ? 'layer-badge badge-ok' : 'layer-badge badge-warn';
+        return stream;
+      }
+
+      // ===================== LAYER 2: SPECTRAL DENOISE (AudioWorklet) =====================
+      /**
+       * Spectral Subtraction via AudioWorklet — inline blob, không cần CDN.
+       *
+       * Thuật toán (STFT-based):
+       *   1. Hann window + FFT 256-point (50% overlap, HOP=128)
+       *   2. Ước lượng noise floor từng bin bằng adaptive minimum tracking
+       *   3. Spectral subtraction: |Y[k]| = max(|X[k]| - β·noise[k], floor·|X[k]|)
+       *   4. Giữ nguyên phase của tín hiệu gốc
+       *   5. IFFT + Overlap-Add (COLA property đảm bảo reconstruction không méo)
+       *
+       * Latency: 1 hop = 128/48000 ≈ 2.7ms (không đáng kể).
+       * Thread: AudioWorklet chạy off-main-thread, không block UI.
+       */
+
+      // Worklet code được inject dưới dạng Blob URL
+      const SPECTRAL_DENOISE_WORKLET = `
+const N = 256;   // FFT size (power of 2)
+const HOP = 128; // hop size = 50% overlap
+
+// Radix-2 Cooley-Tukey FFT (in-place, complex)
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+          t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let ur = 1, ui = 0;
+      for (let k = 0; k < (len >> 1); k++) {
+        const h = i + k + (len >> 1);
+        const tr = ur*re[h] - ui*im[h];
+        const ti = ur*im[h] + ui*re[h];
+        re[h] = re[i+k] - tr; im[h] = im[i+k] - ti;
+        re[i+k] += tr;        im[i+k] += ti;
+        const nur = ur*wr - ui*wi;
+        ui = ur*wi + ui*wr; ur = nur;
+      }
+    }
+  }
+}
+
+function ifft(re, im) {
+  const n = re.length;
+  for (let i = 0; i < n; i++) im[i] = -im[i];
+  fft(re, im);
+  for (let i = 0; i < n; i++) { re[i] /= n; im[i] = (-im[i]) / n; }
+}
+
+class SpectralDenoiseProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ring = new Float32Array(N); // circular input buffer
+    this.wpos = 0;
+    this.outOverlap = new Float32Array(HOP); // OLA overlap buffer
+
+    // Hann window (analysis-only; no synthesis window → COLA property holds)
+    this.win = new Float32Array(N);
+    for (let i = 0; i < N; i++) this.win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / N));
+
+    // Noise floor estimate per FFT bin (magnitude scale)
+    this.noise = new Float32Array(N / 2 + 1);
+    for (let i = 0; i < this.noise.length; i++) this.noise[i] = 0.001;
+
+    this.frameCount = 0;
+    this.bypass = false;
+
+    // Allow main thread to toggle bypass at runtime
+    this.port.onmessage = (e) => {
+      if (e.data.type === 'bypass') this.bypass = e.data.value;
+    };
+  }
+
+  spectralSubtract(signal) {
+    const re = new Float32Array(N), im = new Float32Array(N);
+    for (let i = 0; i < N; i++) re[i] = signal[i] * this.win[i];
+
+    fft(re, im);
+
+    const BETA  = 1.5;   // over-subtraction factor (higher = more aggressive)
+    const FLOOR = 0.08;  // residual floor (prevents musical noise / total silence)
+
+    for (let k = 0; k <= N >> 1; k++) {
+      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+
+      // Adaptive minimum-tracking noise estimation:
+      //   - Fast init for first 20 frames (no assumptions about quiet period)
+      //   - After init: fast downward update (track true minimum) + very slow upward
+      const alpha = this.frameCount < 20
+        ? 0.6
+        : (mag < this.noise[k] ? 0.85 : 0.999);
+      this.noise[k] = alpha * this.noise[k] + (1 - alpha) * mag;
+
+      // Spectral subtraction: suppress noise while preserving signal phase
+      const sub  = mag - BETA * this.noise[k];
+      const gain = mag > 1e-10 ? Math.max(sub, FLOOR * mag) / mag : 0;
+      re[k] *= gain; im[k] *= gain;
+      // Mirror conjugate bins (real signal symmetry)
+      if (k > 0 && k < N >> 1) { re[N - k] *= gain; im[N - k] *= gain; }
+    }
+
+    ifft(re, im);
+    return re; // analysis-only windowing: COLA = sum(win[i - k*HOP]) = 1 for 50% Hann
+  }
+
+  process(inputs, outputs) {
+    const inp = inputs[0] && inputs[0][0];
+    const out = outputs[0] && outputs[0][0];
+    if (!inp || !out) return true;
+
+    // Fill ring buffer with new samples
+    for (let i = 0; i < inp.length; i++) {
+      this.ring[this.wpos] = inp[i];
+      this.wpos = (this.wpos + 1) % N;
+    }
+
+    if (this.bypass) {
+      for (let i = 0; i < out.length; i++) out[i] = inp[i];
+      return true;
+    }
+
+    // Extract last N samples in chronological order from ring buffer
+    const frame = new Float32Array(N);
+    for (let i = 0; i < N; i++) frame[i] = this.ring[(this.wpos + i) % N];
+
+    const processed = this.spectralSubtract(frame);
+    this.frameCount++;
+
+    // Overlap-Add: combine stored overlap with current frame output
+    // With 50% Hann (analysis-only), OLA normalization factor = 1 (no extra multiply needed)
+    for (let i = 0; i < HOP; i++) out[i] = this.outOverlap[i] + processed[i];
+    for (let i = 0; i < HOP; i++) this.outOverlap[i] = processed[HOP + i];
+
+    return true;
+  }
+}
+registerProcessor('spectral-denoise', SpectralDenoiseProcessor);
+`;
+
+      let denoiseNode = null; // kept for runtime toggle
+
+      async function buildSpectralDenoisePipeline(rawStream) {
+        if (!document.getElementById('toggleRnnoise').checked) {
+          badgeL2.textContent = 'Tắt'; badgeL2.className = 'layer-badge badge-skip';
+          const src = audioCtx.createMediaStreamSource(rawStream);
+          drawWaveform(vizL2, makeAnalyser(src), () => true);
+          return rawStream;
+        }
+
+        badgeL2.textContent = 'Đang khởi tạo...'; badgeL2.className = 'layer-badge badge-loading';
 
         try {
-          const rawStream = await navigator.mediaDevices.getUserMedia(constraints);
-          myRawStream = rawStream;
-          
-          // Chạy bộ theo dõi AI mà không thay đổi RAW stream
-          setupVADToggle(rawStream);
-          
-          return rawStream; // Trả về RAW 100% nguyên bản chưa can thiệp!!
-        } catch (err) {
-          console.error("Lỗi lấy Micro:", err);
-          throw err;
+          // Load worklet from inline Blob (no CDN, no network request)
+          const blob = new Blob([SPECTRAL_DENOISE_WORKLET], { type: 'application/javascript' });
+          const url  = URL.createObjectURL(blob);
+          await audioCtx.audioWorklet.addModule(url);
+          URL.revokeObjectURL(url);
+
+          const source  = audioCtx.createMediaStreamSource(rawStream);
+          denoiseNode   = new AudioWorkletNode(audioCtx, 'spectral-denoise');
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 2048;
+          const dest    = audioCtx.createMediaStreamDestination();
+
+          source.connect(denoiseNode);
+          denoiseNode.connect(analyser);
+          analyser.connect(dest);
+
+          // Runtime toggle: send bypass message to worklet thread
+          document.getElementById('toggleRnnoise').addEventListener('change', (e) => {
+            if (denoiseNode) denoiseNode.port.postMessage({ type: 'bypass', value: !e.target.checked });
+          });
+
+          drawWaveform(vizL2, analyser, () => true);
+          badgeL2.textContent = 'STFT Denoise ✓'; badgeL2.className = 'layer-badge badge-ok';
+          return dest.stream;
+
+        } catch (e) {
+          console.warn('[L2] AudioWorklet failed:', e);
+          badgeL2.textContent = 'Không hỗ trợ'; badgeL2.className = 'layer-badge badge-warn';
+          const src = audioCtx.createMediaStreamSource(rawStream);
+          drawWaveform(vizL2, makeAnalyser(src), () => true);
+          return rawStream;
         }
       }
 
+      // ===================== LAYER 3: VAD GATE =====================
+      /**
+       * Gate track của processedStream.
+       * Desktop  → Silero VAD (ONNX, ~1MB model, chính xác cao).
+       * Mobile/iOS → RMS VAD (amplitude threshold, ~0 overhead, universal).
+       *
+       * "Track Hack": clone track chỉ để VAD đọc; original track bị disabled mặc định.
+       * Khi VAD phát hiện giọng → original.enabled = true → WebRTC truyền audio.
+       * Khi im lặng → original.enabled = false → WebRTC nhận silence.
+       */
+      async function setupVADToggle(stream) {
+        if (!document.getElementById('toggleVad').checked) {
+          badgeL3.textContent = 'Tắt'; badgeL3.className = 'layer-badge badge-skip';
+          return; // không gate, stream chạy liên tục
+        }
+
+        const track = stream.getAudioTracks()[0];
+        if (!track) { console.warn('[L3] No audio track'); return; }
+
+        myAudioTrack   = track;
+        speechIsOpen   = false;
+        speechStartTimer = speechEndTimer = null;
+
+        vadBadgeEl.style.display = 'inline-block';
+
+        // Clone track riêng để VAD phân tích — clone không ảnh hưởng WebRTC track gốc
+        const clone = myAudioTrack.clone();
+        clone.enabled = true;
+        const cloneStream = new MediaStream([clone]);
+
+        myAudioTrack.enabled = false; // mặc định mute đến khi VAD mở gate
+
+        if (isLowEndDevice()) {
+          badgeL3.textContent = 'RMS VAD (Mobile)'; badgeL3.className = 'layer-badge badge-loading';
+          setupRMSVAD(cloneStream);
+          badgeL3.className = 'layer-badge badge-ok';
+        } else {
+          badgeL3.textContent = 'Silero VAD'; badgeL3.className = 'layer-badge badge-loading';
+          await setupSileroVAD(cloneStream);
+        }
+      }
+
+      /**
+       * RMS VAD — tính RMS mỗi animation frame, so với ngưỡng.
+       * Không cần model, chạy được mọi nơi, delay ~16ms.
+       */
+      function setupRMSVAD(stream) {
+        const src = audioCtx.createMediaStreamSource(stream);
+        const an  = audioCtx.createAnalyser();
+        an.fftSize = 512;
+        src.connect(an);
+
+        const data = new Float32Array(an.fftSize);
+        let closeTimer = null;
+
+        (function tick() {
+          requestAnimationFrame(tick);
+          an.getFloatTimeDomainData(data);
+          let rms = 0;
+          for (const v of data) rms += v * v;
+          rms = Math.sqrt(rms / data.length);
+
+          if (rms > RMS_THRESHOLD) {
+            if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+            if (!speechIsOpen) {
+              speechIsOpen = true;
+              myAudioTrack.enabled = true;
+              vadBadgeEl.innerText  = '🎤 RMS VAD: MỞ';
+              vadBadgeEl.className  = 'vad-status gate-open';
+            }
+          } else if (speechIsOpen && !closeTimer) {
+            closeTimer = setTimeout(() => {
+              closeTimer = null;
+              speechIsOpen = false;
+              myAudioTrack.enabled = false;
+              vadBadgeEl.innerText  = '🤫 RMS VAD: CHẶN';
+              vadBadgeEl.className  = 'vad-status gate-closed';
+            }, VAD_END_MS);
+          }
+        })();
+      }
+
+      /**
+       * Silero VAD — LSTM model ~1MB chạy qua ONNX Runtime Web.
+       * Nếu load thất bại → tự động fallback sang RMS VAD.
+       */
+      async function setupSileroVAD(stream) {
+        vadBadgeEl.innerText = '⏳ Đang tải Silero VAD...';
+        try {
+          const myvad = await vad.MicVAD.new({
+            stream,
+            onSpeechStart: () => {
+              if (speechEndTimer)   { clearTimeout(speechEndTimer);   speechEndTimer   = null; }
+              if (speechIsOpen || speechStartTimer) return;
+              speechStartTimer = setTimeout(() => {
+                speechStartTimer = null;
+                speechIsOpen = true;
+                myAudioTrack.enabled = true;
+                vadBadgeEl.innerText  = '🎤 Silero VAD: MỞ';
+                vadBadgeEl.className  = 'vad-status gate-open';
+              }, VAD_START_MS);
+            },
+            onSpeechEnd: () => {
+              if (speechStartTimer) { clearTimeout(speechStartTimer); speechStartTimer = null; }
+              if (!speechIsOpen) return;
+              if (speechEndTimer) clearTimeout(speechEndTimer);
+              speechEndTimer = setTimeout(() => {
+                speechEndTimer = null;
+                speechIsOpen   = false;
+                myAudioTrack.enabled = false;
+                vadBadgeEl.innerText  = '🤫 Silero VAD: CHẶN';
+                vadBadgeEl.className  = 'vad-status gate-closed';
+              }, VAD_END_MS);
+            },
+            onVADMisfire: () => {
+              if (speechStartTimer) { clearTimeout(speechStartTimer); speechStartTimer = null; }
+              speechIsOpen = false;
+              myAudioTrack.enabled = false;
+              vadBadgeEl.innerText  = '🤫 Silero: TẠP ÂM';
+              vadBadgeEl.className  = 'vad-status gate-closed';
+            }
+          });
+          myvad.start();
+          vadBadgeEl.innerText = '🤫 Silero VAD: SẴN SÀNG';
+          badgeL3.textContent  = 'Silero ✓'; badgeL3.className = 'layer-badge badge-ok';
+        } catch (e) {
+          console.warn('[L3] Silero failed, falling back to RMS VAD:', e);
+          badgeL3.textContent = 'Silero → RMS'; badgeL3.className = 'layer-badge badge-warn';
+          setupRMSVAD(stream);
+        }
+      }
+
+      // ===================== PIPELINE ORCHESTRATOR =====================
+      /**
+       * Xây toàn bộ audio pipeline theo thứ tự L1 → L2 → L3.
+       * Trả về processedStream đã được gate bởi VAD.
+       */
+      async function buildAudioPipeline() {
+        setupAudioContext();
+
+        // L1: Native AEC
+        statusEl.innerText = '🎙️ Layer 1: Lấy micro (Native AEC)...';
+        const rawStream = await getLayer1Stream();
+
+        // L2: Spectral Denoise (AudioWorklet, inline blob)
+        statusEl.innerText = '🎛️ Layer 2: Khởi tạo Spectral Denoise...';
+        const processedStream = await buildSpectralDenoisePipeline(rawStream);
+
+        // L3: VAD Gate
+        statusEl.innerText = '🤖 Layer 3: Khởi động VAD...';
+        await setupVADToggle(processedStream);
+
+        return processedStream;
+      }
+
+      // ===================== WEBRTC =====================
       function createPeerConnection() {
         pc = new RTCPeerConnection({
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            ws.send(JSON.stringify({
-              type: "candidate",
-              role: myRole,
-              candidate: event.candidate
-            }));
-          }
+        pc.onicecandidate = ({ candidate }) => {
+          if (candidate) ws.send(JSON.stringify({ type: 'candidate', role: myRole, candidate }));
         };
 
-        pc.ontrack = (evt) => {
-          if (evt.track.kind === "audio") {
-            const remoteStream = evt.streams[0];
-            audioEl.srcObject = remoteStream;
-            audioEl.play().catch(e => console.warn("Lỗi auto play", e));
-            
-            // Vẽ đồ thị NHẬN (Loa)
-            attachStreamToVisualizer(remoteStream);
-            statusEl.innerHTML = `<span class="pulse"></span> Đã kết nối WebRTC (P2P): <strong>${myRole}</strong>. Có thể đàm thoại.`;
-          }
+        pc.ontrack = ({ track, streams }) => {
+          if (track.kind !== 'audio') return;
+          const remote = streams[0];
+          audioEl.srcObject = remote;
+          audioEl.play().catch(() => {});
+
+          // Visualise remote audio
+          const src = audioCtx.createMediaStreamSource(remote);
+          drawWaveform(vizRemote, makeAnalyser(src), () => true);
+
+          statusEl.innerHTML = `<strong>${myRole}</strong> — WebRTC P2P kết nối thành công.`;
         };
 
         pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
-            statusEl.innerText = "❌ Mất kết nối P2P mạng.";
+          if (['disconnected', 'failed'].includes(pc.iceConnectionState)) {
+            statusEl.innerText = '❌ Mất kết nối P2P.';
             btns.forEach(b => b.disabled = false);
           }
         };
       }
 
       async function joinCall(role) {
+        btns.forEach(b => b.disabled = true);
+        statusEl.classList.remove('error');
+        myRole = role;
+
         try {
-          btns.forEach(b => b.disabled = true);
-          statusEl.innerText = "🎙️ Đã yêu cầu Micro và Tải AI VAD. (Bơm Cáp Thẳng AEC cứng)...";
-          statusEl.classList.remove("error");
-          myRole = role;
+          // Build L1 → L2 → L3 pipeline
+          const localStream = await buildAudioPipeline();
 
-          const localStream = await getMicrophoneStream();
-
-          statusEl.innerText = "🔍 Đang kết nối kênh Signaling P2P...";
+          statusEl.innerText = '🔍 Đang kết nối Signaling...';
           ws = new WebSocket(WS_URL);
-          
-          ws.onopen = () => {
-            ws.send(JSON.stringify({ type: "join", role: myRole }));
-          };
 
-          ws.onmessage = async (message) => {
-            const data = JSON.parse(message.data);
+          ws.onopen = () => ws.send(JSON.stringify({ type: 'join', role }));
 
-            if (data.type === "joined") {
-              statusEl.innerText = "⏳ Máy chủ Đã Nhận diện, chờ đối tác...";
+          ws.onmessage = async ({ data }) => {
+            const msg = JSON.parse(data);
+
+            if (msg.type === 'joined') {
+              statusEl.innerText = '⏳ Đã kết nối signaling, chờ đối tác...';
               createPeerConnection();
-              
-              // KHÁM PHÁ CỦA CHÚNG TA: Truyền Stream GỐC 100% Nguyên Chứ Không Sửa Gì!
-              localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+              // Gửi processedStream (đã qua L1+L2, được gate bởi L3) vào WebRTC
+              localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
             }
 
-            else if (data.type === "peer_ready") {
-              if (myRole === "user1") {
-                statusEl.innerText = "📞 Phát hiện Máy 2, gửi lời gọi P2P...";
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                ws.send(JSON.stringify({
-                  type: "offer",
-                  role: myRole,
-                  sdp: pc.localDescription
-                }));
-              } else {
-                statusEl.innerText = "✅ Máy 1 Sãn Sàng, Chuẩn Bị Cuộc Gọi...";
-              }
+            else if (msg.type === 'peer_ready' && myRole === 'user1') {
+              statusEl.innerText = '📞 Phát hiện Máy 2, gửi offer...';
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              ws.send(JSON.stringify({ type: 'offer', role, sdp: pc.localDescription }));
             }
-            
-            else if (data.type === "offer") {
-              statusEl.innerText = "Bắt Tay Kỹ Thuật...";
-              await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+            else if (msg.type === 'offer') {
+              await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
               const answer = await pc.createAnswer();
               await pc.setLocalDescription(answer);
-              ws.send(JSON.stringify({
-                type: "answer",
-                role: myRole,
-                sdp: pc.localDescription
-              }));
+              ws.send(JSON.stringify({ type: 'answer', role, sdp: pc.localDescription }));
             }
-            
-            else if (data.type === "answer") {
-              await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+            else if (msg.type === 'answer') {
+              await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
             }
-            
-            else if (data.type === "candidate") {
-              if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-                  await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-              } else {
-                  setTimeout(() => {
-                      if (pc) pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(e=>{});
-                  }, 2000);
-              }
+
+            else if (msg.type === 'candidate' && pc) {
+              const addIce = () =>
+                pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+              pc.remoteDescription?.type ? addIce() : setTimeout(addIce, 2000);
             }
           };
 
-          ws.onerror = (err) => {
-            statusEl.innerText = "⚠️ Signaling hỏng. Vui lòng bật Terminal `py server.py`!";
-            statusEl.classList.add("error");
+          ws.onerror = () => {
+            statusEl.innerText = '⚠️ Signaling thất bại. Hãy chạy: python src/server.py';
+            statusEl.classList.add('error');
             btns.forEach(b => b.disabled = false);
           };
 
         } catch (err) {
-          statusEl.innerText = "⚠️ Lỗi: " + err.message;
-          statusEl.classList.add("error");
+          statusEl.innerText = '⚠️ Lỗi: ' + err.message;
+          statusEl.classList.add('error');
           btns.forEach(b => b.disabled = false);
         }
       }
 
-      document.getElementById("btnUser1").onclick = () => joinCall("user1");
-      document.getElementById("btnUser2").onclick = () => joinCall("user2");
+      document.getElementById('btnUser1').onclick = () => joinCall('user1');
+      document.getElementById('btnUser2').onclick = () => joinCall('user2');
     </script>
   </body>
 </html>

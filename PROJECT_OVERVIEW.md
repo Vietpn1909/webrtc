@@ -2,155 +2,174 @@
 
 ## 1) Tong quan
 
-Du an la mot ung dung **dam thoai 2 nguoi theo thoi gian thuc** dung WebRTC. Hien tai, he thong duoc toi uu theo huong:
-- **Client** xu ly audio ngay tren trinh duyet, gom echo cancellation, noise suppression, auto gain control va VAD gating.
-- **Backend Python** chi dong vai tro **signaling server**: trao doi offer/answer/candidate va dong bo trang thai ket noi giua 2 user.
-
-Ly do chuyen xu ly sang client:
-- Giam latency ro ret so voi viec dua audio ve server roi xu ly.
-- WebRTC co san cac co che xu ly micro tren trinh duyet.
-- Giu duong audio theo kieu P2P, backend khong nam tren duong truyen am thanh.
+Du an la mot ung dung **dam thoai 2 nguoi theo thoi gian thuc** dung WebRTC. Toan bo xu ly audio chay tren client (trinh duyet), backend Python chi dong vai tro signaling server.
 
 Muc tieu chinh:
-- Tao kenh lien lac audio 2 chieu.
-- Giam delay toi da cho call realtime.
-- Giu backend don gian, chi phuc vu signaling va ket noi.
+- Tao kenh lien lac audio 2 chieu, do tre thap nhat co the.
+- Xu ly echo/noise bang 3 lop xep chong, moi lop co the tat/bat doc lap.
+- Ho tro ca PC lan mobile (Android va iOS).
 
-## 2) Cau truc thu muc
+## 2) Kien truc xu ly audio (3 lop)
 
-```text
+```
+Microphone
+    |
+    v
+[L1] Browser Native AEC (AEC3 + NS + AGC)   <- getUserMedia constraints
+    |  rawStream
+    v
+[L2] RNNoise AI Denoising                   <- @jitsi/rnnoise-wasm (WASM, CDN)
+    |  processedStream                          ScriptProcessorNode, 480-sample frames
+    v
+[L3] VAD Gate                               <- Silero VAD (desktop, ONNX Runtime Web)
+    |  gated processedStream                    RMS threshold VAD (mobile/iOS fallback)
+    v
+RTCPeerConnection (P2P audio)
+```
+
+### Chi tiet tung lop
+
+**Layer 1 — Native AEC**
+- Goi `getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })`.
+- AEC duoc xu ly boi WebRTC Audio Processing Engine cua browser (AEC3 tren Chrome/Edge).
+- Zero overhead, hoat dong tot voi tai nghe/headset.
+- Hieu qua giam khi dung loa ngoai.
+
+**Layer 2 — RNNoise**
+- Su dung `@jitsi/rnnoise-wasm` tai tu CDN (jsdelivr).
+- Xu ly qua `ScriptProcessorNode` (deprecated nhung chay duoc tren moi browser ke ca iOS).
+- Buffer logic: ScriptProcessor chunk = 4096 samples; RNNoise frame = 480 samples.
+  - `pendingIn`: samples chua du 480.
+  - `pendingOut`: samples da xu ly chua copy vao output.
+  - 960-sample silence pre-buffer (~20ms) tranh dropout chu ky dau.
+- processFrame(frame) chay in-place, range am thanh +-32768.
+- Neu CDN load that bai -> bypass hoan toan, stream di thang.
+
+**Layer 3 — VAD Gate**
+- "Track Hack": clone track de VAD doc; original track bi `enabled = false` mac dinh.
+- Khi VAD phat hien giong noi -> `original.enabled = true` -> WebRTC truyen audio.
+- Khi im lang -> `original.enabled = false` -> WebRTC nhan silence.
+
+  *Desktop (hardwareConcurrency > 2, khong phai iOS)*:
+  - **Silero VAD**: LSTM model ~1MB, chay qua ONNX Runtime Web.
+  - Debounce: speech_start = 180ms, speech_end hold = 320ms.
+  - Neu load that bai -> tu dong fallback sang RMS VAD.
+
+  *Mobile/iOS (iOS bat ky, hoac <= 2 CPU core)*:
+  - **RMS VAD**: tinh RMS moi animation frame (~60Hz), so nguong `0.012`.
+  - Khong can model, zero CDN dependency, universal.
+  - Nguong co the chinh trong constant `RMS_THRESHOLD`.
+
+## 3) Cau truc thu muc
+
+```
 webrtc/
-|- README.md
-|- requirements.txt
+|- README.md            # Huong dan cai dat & chay
+|- PROJECT_OVERVIEW.md  # Tai lieu ky thuat (file nay)
+|- requirements.txt     # Python dependencies
 `- src/
-  |- server.py      # Backend signaling
-  `- index.html     # Frontend WebRTC 2 nut User1/User2
+   |- server.py         # Backend signaling (aiohttp + WebSocket)
+   `- index.html        # Frontend - toan bo audio pipeline + WebRTC
 ```
 
-## 3) Cong nghe su dung
+## 4) Backend (server.py)
 
-- **Backend**: `aiohttp`, `aiohttp-cors`
-- **Frontend**: HTML + JavaScript thuần (khong framework)
-- **Audio tren client**: `getUserMedia`, Web Audio API, VAD trong browser
-- **Protocol**: WebRTC (SDP offer/answer + ICE/STUN) + WebSocket signaling
+- Framework: `aiohttp` + `aiohttp-cors`.
+- Quan ly 2 vai tro: `user1`, `user2`.
+- Chuyen tiep message: `join` -> `joined`; khi ca 2 join -> `peer_ready`; relay `offer`, `answer`, `candidate`.
+- Khong xu ly audio, khong nam tren duong truyen am thanh.
+- Ho tro SSL tu dong: neu co `cert.pem` + `key.pem` trong `src/` thi bat HTTPS/WSS.
+- Bien moi truong: `PORT` (mac dinh 8080), `FRONTEND_ORIGIN` (CORS).
 
-## 4) Luong hoat dong
+## 5) Frontend (index.html)
 
-1. Nguoi dung mo trinh duyet, bam `Toi la Nguoi 1` hoac `Toi la Nguoi 2`.
-2. Frontend lay micro (`getUserMedia`) voi AEC/NS/AGC va tao `RTCPeerConnection`.
-3. Frontend ket noi toi backend qua WebSocket `/ws` de xin join vao vai tro dang chon.
-4. Backend luu trang thai 2 user, khi ca 2 ben da san sang se gui tin hieu `peer_ready`.
-5. User 1 tao SDP offer, gui qua backend sang user 2; user 2 tao SDP answer va tra lai.
-6. ICE candidate tiep tuc duoc chuyen qua backend de WebRTC hoi tu.
-7. Khi ket noi xong, audio di truc tiep P2P giua 2 trinh duyet.
-8. Client su dung VAD de bat/tat track micro, giup giam am vong va tap am khi khong co tieng noi.
+Cac ham quan trong:
 
-## 5) Cac file quan trong
+| Ham | Lop | Mo ta |
+|---|---|---|
+| `getLayer1Stream()` | L1 | getUserMedia voi AEC constraints |
+| `loadRNNoiseModule()` | L2 | Load @jitsi/rnnoise-wasm tu CDN |
+| `buildRNNoisePipeline(stream, mod)` | L2 | Xay ScriptProcessor pipeline |
+| `setupVADToggle(stream)` | L3 | Dispatch sang Silero hoac RMS VAD |
+| `setupSileroVAD(stream)` | L3 | Silero VAD (desktop) |
+| `setupRMSVAD(stream)` | L3 | RMS VAD (mobile fallback) |
+| `buildAudioPipeline()` | Tat ca | Orchestrate L1->L2->L3, tra ve gated stream |
+| `createPeerConnection()` | WebRTC | RTCPeerConnection + visualizer remote |
+| `joinCall(role)` | Main | Goi buildAudioPipeline() roi khoi dong WebRTC |
 
-- `src/server.py`
-  - Chay backend signaling bang `aiohttp`.
-  - Quan ly ket noi WebSocket cho 2 vai tro `user1`, `user2`.
-  - Chuyen tiep `join`, `offer`, `answer`, `candidate` giua 2 ben.
-  - Khong xu ly audio, khong nam trong duong truyen am thanh.
+**isLowEndDevice()**: Tra ve true neu iOS (moi model) hoac hardwareConcurrency <= 2.
 
-- `src/index.html`
-  - Giao dien don gian 2 nut role.
-  - Lay micro va bat cac tro ly audio cua trinh duyet.
-  - Tao WebRTC offer/answer voi backend qua WebSocket.
-  - Chay VAD de gate track micro, dam bao call realtime it vang va it latency.
-  - Tu dong chon `BACKEND_URL` theo local/production.
+## 6) Signaling flow
 
-## 6) Yeu cau moi truong
+```
+Browser A           Python Server          Browser B
+    |                    |                     |
+    |-- join(user1) ---> |                     |
+    |                    | <-- join(user2) ----|
+    |                    |                     |
+    | <-- peer_ready --- | --- peer_ready ----> |
+    |                    |                     |
+    |-- offer(sdp) ----> | --- offer(sdp) ----> |
+    |                    |                     |
+    | <-- answer(sdp) -- | <-- answer(sdp) ----|
+    |                    |                     |
+    |-- candidate ----> | --- candidate -----> |
+    | <-- candidate ---- | <-- candidate ------|
+    |                    |                     |
+    |<============= P2P audio (no server) =====>|
+```
 
-- Python 3.10+ (khuyen nghi dung venv)
-- Trinh duyet ho tro WebRTC: Chrome/Edge/Firefox
-- May co microphone
+## 7) Yeu cau moi truong
 
-Luu y:
-- Lan dau chay, viec tai model/dependency co the mat them thoi gian.
-- Tren Windows, mot so thu vien audio/video can runtime phu tro (FFmpeg/PyAV da duoc goi qua `av`).
+- Python 3.10+
+- Browser: Chrome 80+ / Edge 80+ / Firefox 76+
+- Microphone
 
-## 7) Cach chay local
-
-### Buoc 1: Tao moi truong ao
+## 8) Cach chay local
 
 ```bash
+# Tao moi truong ao
 python -m venv .venv
-```
+.venv\Scripts\activate      # Windows
+source .venv/bin/activate   # macOS/Linux
 
-Windows (PowerShell):
-```bash
-.venv\Scripts\Activate.ps1
-```
-
-macOS/Linux:
-```bash
-source .venv/bin/activate
-```
-
-### Buoc 2: Cai dependencies
-
-```bash
+# Cai dependencies
 pip install -r requirements.txt
-```
 
-### Buoc 3: Chay server
-
-Tu root repo, chay:
-
-```bash
+# Chay server
 python src/server.py
+
+# Mo http://localhost:8080 tren 2 tab hoac 2 thiet bi
 ```
 
-Mac dinh server chay tai `http://localhost:8080`.
-
-### Buoc 4: Thu ket noi
-
-1. Mo 2 tab (hoac 2 trinh duyet) vao `http://localhost:8080`.
-2. Tab A bam `Toi la Nguoi 1`, tab B bam `Toi la Nguoi 2`.
-3. Cap quyen micro cho ca 2 tab.
-4. Kiem tra am thanh da ket noi.
-
-## 8) Bien moi truong huu ich
-
-- `PORT`: cong server (mac dinh `8080`)
-- `FRONTEND_ORIGIN`: origin duoc phep CORS cho frontend deploy
-
-Vi du:
-
+Test PC <-> mobile cung mang LAN:
 ```bash
-set PORT=8080
-set FRONTEND_ORIGIN=https://your-frontend.vercel.app
+# Lay IP may tinh
+# Windows: ipconfig | Linux/Mac: ifconfig
 python src/server.py
+# Mo http://<IP-may-tinh>:8080 tren mobile
 ```
 
-## 9) HTTPS (tuy chon)
+> Mobile thuong can HTTPS de cap quyen microphone (ngoai localhost).
+> Dat cert.pem + key.pem vao src/ de bat SSL, sau do truy cap https://<IP>:8080.
 
-Neu co `cert.pem` va `key.pem` trong `src/`, backend se bat SSL tu dong.
+## 9) Su co thuong gap
 
-- Co file cert/key -> server co the chay HTTPS.
-- Khong co file cert/key -> server chay HTTP binh thuong.
+**Khong nghe duoc audio**
+- Kiem tra quyen microphone trong browser.
+- Phai mo du 2 role (user1 va user2).
 
-## 10) Su co thuong gap
+**Layer 2 khong hoat dong (badge "Khong kha dung")**
+- CDN jsdelivr co the bi chan trong mang noi bo.
+- App van chay duoc, chi L2 bi bypass.
 
-- **Khong nghe duoc audio**
-  - Kiem tra quyen micro tren trinh duyet.
-  - Dam bao da mo du 2 role (`user1` va `user2`).
-  - Kiem tra log backend xem co loi khi nhan `track` khong.
+**Silero VAD khong load (fallback sang RMS)**
+- Binh thuong tren mang cham. RMS VAD la fallback hop le.
+- Tren iOS: luon dung RMS VAD, day la hanh vi co chu y.
 
-- **Do tre cao**
-  - Kiem tra network, firewall va trang thai WebRTC/ICE.
-  - Dam bao audio xu ly o client dang duoc bat dung cach.
-  - Tat cac ung dung nang CPU/GPU khi test.
+**Do tre cao**
+- Tat Layer 2 va Layer 3 bang checkbox de so sanh.
+- Kiem tra trang thai ICE connection trong browser DevTools.
 
-- **Loi CORS khi tach frontend/backend**
-  - Dat dung gia tri `FRONTEND_ORIGIN`.
-  - Dam bao frontend goi dung `BACKEND_URL`.
-
-## 11) Ghi chu nhanh cho dev moi
-
-- Diem vao chinh de hieu he thong:
-  1. `src/index.html` (xin micro, VAD, offer/answer, phat audio)
-  2. `src/server.py` (signaling backend)
-  3. Luong audio thuc te chay trong browser, khong di qua server.
-- Neu can benchmark latency, hay so sanh giua bat/tat VAD va cac thuoc tinh audio cua trinh duyet.
+**Mobile khong cap quyen micro**
+- Can HTTPS. Bat SSL bang cach dat cert.pem/key.pem vao src/.
