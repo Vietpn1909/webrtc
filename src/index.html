@@ -3,11 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>P2P Audio Hub — 3-Layer AEC</title>
+    <title>P2P Audio Hub — Push to Talk</title>
 
-    <!-- Layer 3: Silero VAD (ONNX Runtime) — loaded upfront -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.19/dist/bundle.min.js"></script>
+    <!-- Layer 3: Push-to-talk control -->
     <!-- Layer 2: Spectral Denoise worklet (inline blob, no CDN needed) -->
 
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet" />
@@ -151,8 +149,8 @@
   </head>
   <body>
     <div class="container">
-      <h1>3-Layer AEC Demo</h1>
-      <p class="subtitle">Native AEC &rarr; Spectral Denoise &rarr; VAD Gate &nbsp;|&nbsp; P2P Audio</p>
+      <h1>Push-to-Talk P2P Audio</h1>
+      <p class="subtitle">Native AEC &rarr; Spectral Denoise &rarr; Space để mở mic &nbsp;|&nbsp; P2P Audio</p>
 
       <div class="btn-group">
         <button id="btnUser1">Người 1 (Gọi)</button>
@@ -174,12 +172,12 @@
         </div>
         <div class="toggle-item">
           <input type="checkbox" id="toggleVad" checked />
-          <label for="toggleVad">Layer 3 — VAD Gate (Silero / RMS)</label>
+          <label for="toggleVad">Layer 3 — Push-to-talk (giữ phím Space)</label>
           <span id="badgeL3" class="layer-badge badge-skip">Chưa tải</span>
         </div>
       </div>
 
-      <div id="vadBadge" class="vad-status gate-closed" style="display:none;">VAD Standby</div>
+      <div id="vadBadge" class="vad-status gate-closed" style="display:none;">Space để nói</div>
       <div id="status">Sẵn sàng kết nối...</div>
 
       <div class="canvas-container">
@@ -202,18 +200,16 @@
 
     <script>
       // ===================== CONSTANTS =====================
-      const VAD_START_MS  = 180;
-      const VAD_END_MS    = 320;
-      const RMS_THRESHOLD = 0.012;
       const WS_URL = window.__env?.BACKEND_URL ||
         (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 
       // ===================== STATE =====================
       let pc = null, ws = null, myRole = null;
       let audioCtx = null;
-      let myAudioTrack = null;         // track trên processedStream bị gate bởi VAD
+      let myAudioTrack = null;         // track trên processedStream bị gate bởi push-to-talk
       let speechIsOpen = false;
-      let speechStartTimer = null, speechEndTimer = null;
+      let pushToTalkActive = false;
+      let pushToTalkBound = false;
 
       // ===================== DOM =====================
       const audioEl    = document.getElementById('audioOutput');
@@ -225,16 +221,6 @@
       const badgeL3    = document.getElementById('badgeL3');
 
       // ===================== UTILS =====================
-      /**
-       * iOS luôn dùng RMS VAD vì AudioWorklet và ONNX Runtime có vấn đề với AVAudioSession.
-       * Thiết bị <= 2 core cũng fallback để tiết kiệm CPU.
-       */
-      function isLowEndDevice() {
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-        const veryLowCores = (navigator.hardwareConcurrency || 2) <= 2;
-        return isIOS || veryLowCores;
-      }
-
       function setupAudioContext() {
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -508,17 +494,50 @@ registerProcessor('spectral-denoise', SpectralDenoiseProcessor);
         }
       }
 
-      // ===================== LAYER 3: VAD GATE =====================
+      // ===================== LAYER 3: PUSH-TO-TALK =====================
       /**
-       * Gate track của processedStream.
-       * Desktop  → Silero VAD (ONNX, ~1MB model, chính xác cao).
-       * Mobile/iOS → RMS VAD (amplitude threshold, ~0 overhead, universal).
-       *
-       * "Track Hack": clone track chỉ để VAD đọc; original track bị disabled mặc định.
-       * Khi VAD phát hiện giọng → original.enabled = true → WebRTC truyền audio.
-       * Khi im lặng → original.enabled = false → WebRTC nhận silence.
+       * Gate track của processedStream bằng phím Space.
+       * Track gốc luôn bị disable mặc định, chỉ bật khi người dùng giữ Space.
        */
-      async function setupVADToggle(stream) {
+      function updatePushToTalkState(active) {
+        if (!myAudioTrack) return;
+        if (pushToTalkActive === active) return;
+
+        pushToTalkActive = active;
+        myAudioTrack.enabled = active;
+        vadBadgeEl.innerText = active ? '🎤 Đang nói' : '🤫 Đang chặn';
+        vadBadgeEl.className = active ? 'vad-status gate-open' : 'vad-status gate-closed';
+      }
+
+      function bindPushToTalkControls() {
+        if (pushToTalkBound) return;
+        pushToTalkBound = true;
+
+        const isTypingTarget = (target) => {
+          if (!target) return false;
+          const tag = target.tagName;
+          return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+        };
+
+        window.addEventListener('keydown', (event) => {
+          if (event.code !== 'Space' || event.repeat || isTypingTarget(event.target)) return;
+          event.preventDefault();
+          updatePushToTalkState(true);
+        });
+
+        window.addEventListener('keyup', (event) => {
+          if (event.code !== 'Space') return;
+          event.preventDefault();
+          updatePushToTalkState(false);
+        });
+
+        window.addEventListener('blur', () => updatePushToTalkState(false));
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) updatePushToTalkState(false);
+        });
+      }
+
+      async function setupPushToTalk(stream) {
         if (!document.getElementById('toggleVad').checked) {
           badgeL3.textContent = 'Tắt'; badgeL3.className = 'layer-badge badge-skip';
           return; // không gate, stream chạy liên tục
@@ -528,122 +547,19 @@ registerProcessor('spectral-denoise', SpectralDenoiseProcessor);
         if (!track) { console.warn('[L3] No audio track'); return; }
 
         myAudioTrack   = track;
-        speechIsOpen   = false;
-        speechStartTimer = speechEndTimer = null;
+        pushToTalkActive = false;
 
-        vadBadgeEl.style.display = 'inline-block';
-
-        // Clone track riêng để VAD phân tích — clone không ảnh hưởng WebRTC track gốc
-        const clone = myAudioTrack.clone();
-        clone.enabled = true;
-        const cloneStream = new MediaStream([clone]);
-
-        myAudioTrack.enabled = false; // mặc định mute đến khi VAD mở gate
-
-        if (isLowEndDevice()) {
-          badgeL3.textContent = 'RMS VAD (Mobile)'; badgeL3.className = 'layer-badge badge-loading';
-          setupRMSVAD(cloneStream);
-          badgeL3.className = 'layer-badge badge-ok';
-        } else {
-          badgeL3.textContent = 'Silero VAD'; badgeL3.className = 'layer-badge badge-loading';
-          await setupSileroVAD(cloneStream);
-        }
-      }
-
-      /**
-       * RMS VAD — tính RMS mỗi animation frame, so với ngưỡng.
-       * Không cần model, chạy được mọi nơi, delay ~16ms.
-       */
-      function setupRMSVAD(stream) {
-        const src = audioCtx.createMediaStreamSource(stream);
-        const an  = audioCtx.createAnalyser();
-        an.fftSize = 512;
-        src.connect(an);
-
-        const data = new Float32Array(an.fftSize);
-        let closeTimer = null;
-
-        (function tick() {
-          requestAnimationFrame(tick);
-          an.getFloatTimeDomainData(data);
-          let rms = 0;
-          for (const v of data) rms += v * v;
-          rms = Math.sqrt(rms / data.length);
-
-          if (rms > RMS_THRESHOLD) {
-            if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
-            if (!speechIsOpen) {
-              speechIsOpen = true;
-              myAudioTrack.enabled = true;
-              vadBadgeEl.innerText  = '🎤 RMS VAD: MỞ';
-              vadBadgeEl.className  = 'vad-status gate-open';
-            }
-          } else if (speechIsOpen && !closeTimer) {
-            closeTimer = setTimeout(() => {
-              closeTimer = null;
-              speechIsOpen = false;
-              myAudioTrack.enabled = false;
-              vadBadgeEl.innerText  = '🤫 RMS VAD: CHẶN';
-              vadBadgeEl.className  = 'vad-status gate-closed';
-            }, VAD_END_MS);
-          }
-        })();
-      }
-
-      /**
-       * Silero VAD — LSTM model ~1MB chạy qua ONNX Runtime Web.
-       * Nếu load thất bại → tự động fallback sang RMS VAD.
-       */
-      async function setupSileroVAD(stream) {
-        vadBadgeEl.innerText = '⏳ Đang tải Silero VAD...';
-        try {
-          const myvad = await vad.MicVAD.new({
-            stream,
-            onSpeechStart: () => {
-              if (speechEndTimer)   { clearTimeout(speechEndTimer);   speechEndTimer   = null; }
-              if (speechIsOpen || speechStartTimer) return;
-              speechStartTimer = setTimeout(() => {
-                speechStartTimer = null;
-                speechIsOpen = true;
-                myAudioTrack.enabled = true;
-                vadBadgeEl.innerText  = '🎤 Silero VAD: MỞ';
-                vadBadgeEl.className  = 'vad-status gate-open';
-              }, VAD_START_MS);
-            },
-            onSpeechEnd: () => {
-              if (speechStartTimer) { clearTimeout(speechStartTimer); speechStartTimer = null; }
-              if (!speechIsOpen) return;
-              if (speechEndTimer) clearTimeout(speechEndTimer);
-              speechEndTimer = setTimeout(() => {
-                speechEndTimer = null;
-                speechIsOpen   = false;
-                myAudioTrack.enabled = false;
-                vadBadgeEl.innerText  = '🤫 Silero VAD: CHẶN';
-                vadBadgeEl.className  = 'vad-status gate-closed';
-              }, VAD_END_MS);
-            },
-            onVADMisfire: () => {
-              if (speechStartTimer) { clearTimeout(speechStartTimer); speechStartTimer = null; }
-              speechIsOpen = false;
-              myAudioTrack.enabled = false;
-              vadBadgeEl.innerText  = '🤫 Silero: TẠP ÂM';
-              vadBadgeEl.className  = 'vad-status gate-closed';
-            }
-          });
-          myvad.start();
-          vadBadgeEl.innerText = '🤫 Silero VAD: SẴN SÀNG';
-          badgeL3.textContent  = 'Silero ✓'; badgeL3.className = 'layer-badge badge-ok';
-        } catch (e) {
-          console.warn('[L3] Silero failed, falling back to RMS VAD:', e);
-          badgeL3.textContent = 'Silero → RMS'; badgeL3.className = 'layer-badge badge-warn';
-          setupRMSVAD(stream);
-        }
+        myAudioTrack.enabled = false; // mặc định mute đến khi người dùng giữ Space
+        badgeL3.textContent = 'Space to talk';
+        badgeL3.className = 'layer-badge badge-ok';
+        vadBadgeEl.innerText = 'Space để nói';
+        vadBadgeEl.className = 'vad-status gate-closed';
+        bindPushToTalkControls();
       }
 
       // ===================== PIPELINE ORCHESTRATOR =====================
       /**
-       * Xây toàn bộ audio pipeline theo thứ tự L1 → L2 → L3.
-       * Trả về processedStream đã được gate bởi VAD.
+       * Trả về processedStream đã được gate bởi push-to-talk.
        */
       async function buildAudioPipeline() {
         setupAudioContext();
@@ -656,9 +572,9 @@ registerProcessor('spectral-denoise', SpectralDenoiseProcessor);
         statusEl.innerText = '🎛️ Layer 2: Khởi tạo Spectral Denoise...';
         const processedStream = await buildSpectralDenoisePipeline(rawStream);
 
-        // L3: VAD Gate
-        statusEl.innerText = '🤖 Layer 3: Khởi động VAD...';
-        await setupVADToggle(processedStream);
+        // L3: Push-to-talk
+        statusEl.innerText = '🤖 Layer 3: Khởi động push-to-talk...';
+        await setupPushToTalk(processedStream);
 
         return processedStream;
       }
