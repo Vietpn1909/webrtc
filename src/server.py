@@ -3,6 +3,8 @@ import json
 import logging
 import ssl
 import os
+import sys
+import time
 from aiohttp import web
 import aiohttp_cors
 
@@ -70,19 +72,23 @@ async def websocket_handler(request):
                         continue
                     
                     target_ws = connected_clients.get(target_role)
-                    if target_ws:
-                        # Gửi nguyên vẹn thông điệp qua bên kia
-                        logger.info(f"Chuyển {msg_type} từ {current_role} sang {target_role}")
+                    if target_ws is not None and not target_ws.closed:
+                        logger.info(f"Chuyển {msg_type} từ {current_role} → {target_role}")
                         await target_ws.send_json(data)
                     else:
-                        logger.warning(f"{target_role} chưa kết nối. Khởi lưu message thất bại.")
+                        if target_ws is not None and target_ws.closed:
+                            logger.warning(f"{target_role} WS đã closed, dọn dict.")
+                            del connected_clients[target_role]
+                        else:
+                            logger.warning(f"{target_role} chưa kết nối.")
                         
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"Lỗi cú pháp Websocket {ws.exception()}")
     finally:
         if current_role and connected_clients.get(current_role) == ws:
             del connected_clients[current_role]
-            logger.info(f"<== Tài khoản {current_role} đã thoát.")
+            logger.warning(f"<== [{time.strftime('%H:%M:%S')}] {current_role} DISCONNECT. "
+                           f"ws.closed={ws.closed}, exception={ws.exception()}")
 
     return ws
 
@@ -91,6 +97,9 @@ async def on_shutdown(app):
         await ws.close(code=1001, message='Server shutdown')
 
 if __name__ == "__main__":
+    # Proactor event loop trên Windows gây WS bị đóng sớm
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
